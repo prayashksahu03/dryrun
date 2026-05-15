@@ -267,13 +267,14 @@ function EditorMode() {
 // ── Debug mode (trace loaded) ─────────────────────────────────────────
 
 function DebugMode() {
-  const { trace, currentFrame, clearTrace, language, stdinInput } = useExecutionStore();
+  const { trace, currentFrame, clearTrace, language, stdinInput, setStdinInput } = useExecutionStore();
   const frame       = currentFrame();
   const currentLine = frame?.line ?? -1;
   const isCrash     = frame?.event.type === 'crash';
   const lines       = (trace?.source ?? '').split('\n');
   const scrollRef   = useRef<HTMLDivElement>(null);
   const activeRef   = useRef<HTMLDivElement>(null);
+  const [stdinOpen, setStdinOpen] = useState(true);
 
   useEffect(() => {
     if (activeRef.current && scrollRef.current) {
@@ -332,12 +333,34 @@ function DebugMode() {
         })}
       </div>
 
-      {stdinInput.trim() && (
-        <div className="border-t border-zinc-800/60 flex-shrink-0 px-3 py-1.5 flex items-center gap-2 bg-[#080809]">
-          <span className="text-[9px] font-mono text-cyan-600/70 flex-shrink-0">stdin</span>
-          <span className="text-[10px] font-mono text-cyan-400/60 truncate">{stdinInput.trim()}</span>
-        </div>
-      )}
+      <div className="border-t border-zinc-800/60 flex-shrink-0">
+        <button
+          onClick={() => setStdinOpen(o => !o)}
+          className="w-full flex items-center justify-between px-3 py-1.5 hover:bg-zinc-800/40 transition-colors"
+        >
+          <span className="flex items-center gap-1.5 text-[10px] font-mono text-cyan-600/80">
+            <span className={`transition-transform duration-150 text-[8px] ${stdinOpen ? 'rotate-90' : ''}`}>▶</span>
+            stdin
+          </span>
+          {stdinInput.trim() ? (
+            <span className="text-cyan-700 text-[9px] font-mono">
+              {stdinInput.trim().split(/\s+/).length} token{stdinInput.trim().split(/\s+/).length !== 1 ? 's' : ''}
+            </span>
+          ) : (
+            <span className="text-zinc-700 text-[9px] font-mono">values for cin &gt;&gt;</span>
+          )}
+        </button>
+        {stdinOpen && (
+          <textarea
+            value={stdinInput}
+            onChange={e => setStdinInput(e.target.value)}
+            placeholder="Space or newline separated values for cin&#10;e.g.  5  hello  3.14"
+            spellCheck={false}
+            className="w-full bg-[#080809] text-cyan-300 text-[11px] font-mono px-3 py-2 resize-none outline-none border-none leading-relaxed placeholder:text-zinc-700"
+            style={{ height: 56, caretColor: '#22d3ee', borderTop: '1px solid rgba(34,211,238,0.08)' }}
+          />
+        )}
+      </div>
 
       <div className={`px-4 py-2.5 border-t text-xs font-mono leading-relaxed flex-shrink-0 ${
         isCrash
