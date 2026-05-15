@@ -306,7 +306,7 @@ function EditorMode() {
           {language === 'python'
             ? '⌘ Enter to run  ·  supports: lists, 2D arrays, recursion, loops'
             : language === 'cpp'
-            ? '⌘ Enter to run  ·  supports: vector, long long, min/max, DP arrays'
+            ? '⌘ Enter to run  ·  main() required  ·  cin reads from stdin panel  ·  supports: vector, map, set, DP'
             : '⌘ Enter to run  ·  supports: malloc, free, structs, pointers, if/while/for'}
         </div>
       )}

@@ -14,7 +14,7 @@ export const TOUR_STEPS: TourStep[] = [
   {
     target: '[data-tour="code-editor"]',
     title: 'Code Editor',
-    body: 'Write C, C++, or Python here. Switch language with the pills in the toolbar. Hit ⌘ Enter or click Run to trace your program.',
+    body: 'Write C++ or Python here. Paste competitive-style code directly — main() is required. Use the stdin panel below the editor for cin input. Hit ⌘ Enter or Run to trace.',
     placement: 'right',
   },
   {
