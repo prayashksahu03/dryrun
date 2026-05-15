@@ -68,6 +68,7 @@ export default function App() {
   const [learnOpen, setLearnOpen] = useState(false);
   const isFirstVisit = !localStorage.getItem('dryrun_visited');
   const [tourStep, setTourStep] = useState<number | null>(isFirstVisit ? 0 : null);
+  const [feedbackBanner, setFeedbackBanner] = useState(!localStorage.getItem('dryrun_feedback_dismissed'));
 
   const startTour = () => setTourStep(0);
   const exitTour  = () => {
@@ -148,6 +149,30 @@ export default function App() {
       </header>
 
       <LearnPanel open={learnOpen} onClose={() => setLearnOpen(false)} />
+
+      {feedbackBanner && (
+        <div className="flex items-center justify-between px-5 py-2 bg-violet-500/10 border-b border-violet-500/20 flex-shrink-0 z-10">
+          <span className="text-[11px] font-mono text-violet-300/80">
+            👋 Built by students, for students — your feedback shapes what we build next.
+          </span>
+          <div className="flex items-center gap-3">
+            <a
+              href="https://tally.so/r/vGJyED"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[11px] font-mono font-medium text-violet-300 hover:text-white transition-colors border border-violet-500/40 hover:border-violet-400/60 px-2.5 py-0.5 rounded hover:bg-violet-500/20"
+            >
+              share feedback →
+            </a>
+            <button
+              onClick={() => { localStorage.setItem('dryrun_feedback_dismissed', '1'); setFeedbackBanner(false); }}
+              className="text-zinc-600 hover:text-zinc-400 text-[11px] font-mono transition-colors"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
 
       {tourStep !== null && (
         <TourOverlay
