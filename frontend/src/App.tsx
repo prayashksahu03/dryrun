@@ -94,7 +94,7 @@ export default function App() {
       {/* Nav */}
       <header className="flex items-center justify-between px-5 h-11 border-b border-zinc-800/80 flex-shrink-0 bg-[#09090b]/90 backdrop-blur z-20">
         <div className="flex items-center gap-3">
-          <span className="text-violet-400 font-mono font-semibold text-sm tracking-tight">◈ MemTrace</span>
+          <span className="text-violet-400 font-mono font-semibold text-sm tracking-tight">◈ DryRun</span>
           <span className="text-zinc-700">│</span>
           <span className="text-zinc-500 text-xs font-mono truncate max-w-xs">
             {activeGuidedProgram ? activeGuidedProgram.title : trace ? trace.name : 'Write your program'}

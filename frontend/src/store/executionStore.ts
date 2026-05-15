@@ -6,7 +6,7 @@ import { danglingPointerTrace } from '../data/danglingPointer';
 import { factorialTrace } from '../data/factorial';
 import { GuidedProgram } from '../data/guided';
 
-const BACKEND = import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000';
+const BACKEND = 'http://localhost:8000';
 
 const DEMOS: Trace[] = [danglingPointerTrace, factorialTrace];
 
@@ -77,7 +77,7 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
   isLoading: false,
   error: null,
   demoIndex: 0,
-  language: 'c' as Language,
+  language: 'cpp' as Language,
   panels: { stack: true, heap: true, callTree: true, eventLog: true },
   activeGuidedProgram: null,
   ambiguities: [],
@@ -214,7 +214,7 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
         isLoading: false,
         trace: null,
         error: msg.includes('fetch') || msg.includes('Failed to fetch')
-          ? 'Cannot reach backend.\nRun in a new terminal:\n  cd ~/memtrace-backend\n  pip install -r requirements.txt\n  uvicorn main:app --reload'
+          ? 'Cannot reach backend.\nRun in a new terminal:\n  cd ~/dryrun/backend\n  pip install -r requirements.txt\n  uvicorn main:app --reload'
           : msg,
       });
     }

@@ -172,7 +172,7 @@ function EditorMode() {
           <span className="ml-2 text-xs text-zinc-500 font-mono">{LANG_FILE[language]}</span>
         </div>
         <div className="flex items-center gap-1">
-          {(['c', 'cpp', 'python'] as Language[]).map(l => (
+          {(['cpp', 'python'] as Language[]).map(l => (
             <LangPill key={l} lang={l} />
           ))}
         </div>
