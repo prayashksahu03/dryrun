@@ -267,7 +267,7 @@ function EditorMode() {
 // ── Debug mode (trace loaded) ─────────────────────────────────────────
 
 function DebugMode() {
-  const { trace, currentFrame, clearTrace, language } = useExecutionStore();
+  const { trace, currentFrame, clearTrace, language, stdinInput } = useExecutionStore();
   const frame       = currentFrame();
   const currentLine = frame?.line ?? -1;
   const isCrash     = frame?.event.type === 'crash';
@@ -331,6 +331,13 @@ function DebugMode() {
           );
         })}
       </div>
+
+      {stdinInput.trim() && (
+        <div className="border-t border-zinc-800/60 flex-shrink-0 px-3 py-1.5 flex items-center gap-2 bg-[#080809]">
+          <span className="text-[9px] font-mono text-cyan-600/70 flex-shrink-0">stdin</span>
+          <span className="text-[10px] font-mono text-cyan-400/60 truncate">{stdinInput.trim()}</span>
+        </div>
+      )}
 
       <div className={`px-4 py-2.5 border-t text-xs font-mono leading-relaxed flex-shrink-0 ${
         isCrash
