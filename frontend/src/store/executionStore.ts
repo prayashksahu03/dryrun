@@ -6,7 +6,7 @@ import { danglingPointerTrace } from '../data/danglingPointer';
 import { factorialTrace } from '../data/factorial';
 import { GuidedProgram } from '../data/guided';
 
-const BACKEND = 'http://localhost:8000';
+const BACKEND = import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000';
 
 const DEMOS: Trace[] = [danglingPointerTrace, factorialTrace];
 
