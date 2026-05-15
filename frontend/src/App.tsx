@@ -66,10 +66,14 @@ export default function App() {
   const isCrash = frame?.event.type === 'crash';
 
   const [learnOpen, setLearnOpen] = useState(false);
-  const [tourStep, setTourStep]   = useState<number | null>(null);
+  const isFirstVisit = !localStorage.getItem('dryrun_visited');
+  const [tourStep, setTourStep] = useState<number | null>(isFirstVisit ? 0 : null);
 
   const startTour = () => setTourStep(0);
-  const exitTour  = () => setTourStep(null);
+  const exitTour  = () => {
+    localStorage.setItem('dryrun_visited', '1');
+    setTourStep(null);
+  };
 
   // Column widths (as percentages of the container)
   const [codePct, setCodePct]           = useState(34);
