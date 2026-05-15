@@ -117,6 +117,14 @@ export default function App() {
             </span>
           )}
           <span className="text-zinc-700 text-xs font-mono hidden sm:block">← → to step  ·  space to play</span>
+          <a
+            href="https://tally.so/r/vGJyED"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="h-7 px-2.5 rounded text-[11px] font-mono text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-all border border-zinc-700/50 hover:border-zinc-600/70 flex items-center"
+          >
+            feedback
+          </a>
           <button
             onClick={startTour}
             className="h-7 px-2.5 rounded text-[11px] font-mono text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-all border border-zinc-700/50 hover:border-zinc-600/70"
