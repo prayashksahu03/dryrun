@@ -122,7 +122,7 @@ export default function App() {
             href="https://tally.so/r/vGJyED"
             target="_blank"
             rel="noopener noreferrer"
-            className="text-[11px] font-mono text-zinc-600 hover:text-zinc-400 transition-colors hidden sm:block"
+            className="h-7 px-2.5 rounded text-[11px] font-mono font-medium flex items-center transition-all bg-violet-500/15 text-violet-400 border border-violet-500/30 hover:bg-violet-500/25 hover:text-violet-300 hover:border-violet-500/50"
           >
             feedback
           </a>
@@ -151,26 +151,16 @@ export default function App() {
       <LearnPanel open={learnOpen} onClose={() => setLearnOpen(false)} />
 
       {feedbackBanner && (
-        <div className="flex items-center justify-between px-5 py-2 bg-violet-500/10 border-b border-violet-500/20 flex-shrink-0 z-10">
+        <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-2.5 rounded-xl border border-violet-500/30 bg-[#0d0b14]/95 backdrop-blur shadow-2xl shadow-black/50">
           <span className="text-[11px] font-mono text-violet-300/80">
-            👋 Built by students, for students — your feedback shapes what we build next.
+            👋 Built for students — your feedback shapes what we build next.
           </span>
-          <div className="flex items-center gap-3">
-            <a
-              href="https://tally.so/r/vGJyED"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-[11px] font-mono font-medium text-violet-300 hover:text-white transition-colors border border-violet-500/40 hover:border-violet-400/60 px-2.5 py-0.5 rounded hover:bg-violet-500/20"
-            >
-              share feedback →
-            </a>
-            <button
-              onClick={() => { localStorage.setItem('dryrun_feedback_dismissed', '1'); setFeedbackBanner(false); }}
-              className="text-zinc-600 hover:text-zinc-400 text-[11px] font-mono transition-colors"
-            >
-              ✕
-            </button>
-          </div>
+          <button
+            onClick={() => { localStorage.setItem('dryrun_feedback_dismissed', '1'); setFeedbackBanner(false); }}
+            className="text-zinc-600 hover:text-zinc-400 text-[11px] font-mono transition-colors ml-1"
+          >
+            ✕
+          </button>
         </div>
       )}
 
