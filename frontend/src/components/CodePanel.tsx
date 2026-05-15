@@ -85,48 +85,6 @@ int main() {
 }
 `;
 
-const DEFAULT_PY = `def knapsack(weights, values, cap):
-    n = len(weights)
-    dp = [[0] * (cap + 1) for _ in range(n + 1)]
-    for i in range(1, n + 1):
-        for w in range(cap + 1):
-            dp[i][w] = dp[i-1][w]
-            if weights[i-1] <= w:
-                take = dp[i-1][w - weights[i-1]] + values[i-1]
-                if take > dp[i][w]:
-                    dp[i][w] = take
-    return dp[n][cap]
-
-weights = [1, 3, 4, 5]
-values  = [1, 4, 5, 7]
-result  = knapsack(weights, values, 7)
-`;
-
-function LangPill({ lang }: { lang: Language }) {
-  const { language, setLanguage, setEditorSource, editorSource } = useExecutionStore();
-  const active = language === lang;
-
-  const handleClick = () => {
-    if (active) return;
-    setLanguage(lang);
-    // Switch to a default template only when the editor still has the other language's default
-    if (lang === 'cpp' && editorSource !== DEFAULT_CPP) setEditorSource(DEFAULT_CPP);
-    if (lang === 'python' && editorSource !== DEFAULT_PY) setEditorSource(DEFAULT_PY);
-  };
-
-  return (
-    <button
-      onClick={handleClick}
-      className={`px-2 py-0.5 rounded text-[10px] font-mono font-medium transition-all ${
-        active
-          ? 'bg-violet-500/30 text-violet-300 border border-violet-500/50'
-          : 'text-zinc-600 hover:text-zinc-400 border border-transparent hover:border-zinc-700'
-      }`}
-    >
-      {LANG_LABELS[lang]}
-    </button>
-  );
-}
 
 // ── Editor mode ───────────────────────────────────────────────────────
 
@@ -150,7 +108,7 @@ function EditorMode() {
       const ta   = textareaRef.current!;
       const start = ta.selectionStart;
       const end   = ta.selectionEnd;
-      const indent = language === 'python' ? '    ' : '    ';
+      const indent = '    ';
       const next  = editorSource.substring(0, start) + indent + editorSource.substring(end);
       setEditorSource(next);
       requestAnimationFrame(() => {
@@ -171,11 +129,7 @@ function EditorMode() {
           <span className="w-2.5 h-2.5 rounded-full bg-green-500/60" />
           <span className="ml-2 text-xs text-zinc-500 font-mono">{LANG_FILE[language]}</span>
         </div>
-        <div className="flex items-center gap-1">
-          {(['cpp', 'python'] as Language[]).map(l => (
-            <LangPill key={l} lang={l} />
-          ))}
-        </div>
+        <div />
         <div className="flex items-center gap-2">
           <button
             onClick={loadDemo}
@@ -252,8 +206,8 @@ function EditorMode() {
         />
       </div>
 
-      {/* stdin panel — C/C++ only */}
-      {(language === 'cpp' || language === 'c') && (
+      {/* stdin panel */}
+      {language === 'cpp' && (
         <div className="border-t border-zinc-800/60 flex-shrink-0">
           <button
             onClick={() => setStdinOpen(o => !o)}
@@ -303,11 +257,7 @@ function EditorMode() {
         </div>
       ) : (
         <div className="px-3 py-2 border-t border-zinc-800/60 bg-zinc-900/30 text-[10px] font-mono text-zinc-600 flex-shrink-0">
-          {language === 'python'
-            ? '⌘ Enter to run  ·  supports: lists, 2D arrays, recursion, loops'
-            : language === 'cpp'
-            ? '⌘ Enter to run  ·  main() required  ·  cin reads from stdin panel  ·  supports: vector, map, set, DP'
-            : '⌘ Enter to run  ·  supports: malloc, free, structs, pointers, if/while/for'}
+          ⌘ Enter to run  ·  main() required  ·  cin reads from stdin panel  ·  supports: vector, map, set, DP
         </div>
       )}
     </div>
