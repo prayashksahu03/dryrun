@@ -377,16 +377,17 @@ class CppInterpreter:
             already = (self.trace and self.trace[-1].get('event', {}).get('type') == 'crash')
             if not already:
                 ln = self._adj(e.line) if e.line else -1
+                desc = f'Line {ln}: {e.message}' if ln > 0 else e.message
                 self.memory.update_line(ln)
                 self.trace.append({
                     'index':       len(self.trace),
                     'line':        ln,
-                    'description': e.message,
+                    'description': desc,
                     'event': {
                         'type':    'crash',
                         'kind':    e.kind,
                         'address': e.address,
-                        'message': e.message,
+                        'message': desc,
                     },
                     'memory': self.memory.snapshot(),
                 })
@@ -4441,15 +4442,17 @@ class CppInterpreter:
 
     def _crash(self, line: int, kind: str, message: str):
         """Emit a crash step and raise SegFaultError to stop execution."""
+        adj = self._adj(line)
+        desc = f'Line {adj}: {message}' if adj > 0 else message
         self.memory.update_line(line)
         self.trace.append({
             'index':       len(self.trace),
-            'line':        self._adj(line),
-            'description': message,
-            'event': {'type': 'crash', 'kind': kind, 'message': message, 'address': None},
+            'line':        adj,
+            'description': desc,
+            'event': {'type': 'crash', 'kind': kind, 'message': desc, 'address': None},
             'memory':      self.memory.snapshot(),
         })
-        raise SegFaultError(kind, message, None, line)
+        raise SegFaultError(kind, desc, None, line)
 
     # ── Centralised array mutation helpers ──────────────────────────────────
     # All array writes go through one of these two methods so that lastWrite
