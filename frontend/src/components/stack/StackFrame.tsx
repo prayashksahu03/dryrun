@@ -3,6 +3,7 @@ import { StackFrameData, VariableValue } from '../../types/trace';
 import { useExecutionStore } from '../../store/executionStore';
 import StackVariable from './StackVariable';
 import ArrayViz, { ArrayPointer } from '../arrays/ArrayViz';
+import StringViz from '../arrays/StringViz';
 import { StackViz, QueueViz } from '../arrays/StackQueueViz';
 import { SetViz, MapViz } from '../arrays/SetViz';
 
@@ -176,6 +177,30 @@ export default function StackFrameComponent({
               </div>
             );
           }
+          // String viz: char-kind with length > 1 renders as character boxes with index pointers
+          if (val.kind === 'char' && val.value.length > 1) {
+            const strLen = val.value.length;
+            const pointers = computePointers(frame, name, strLen);
+            // Detect last-modified character index by diffing prev value
+            let lastWrite: number | undefined;
+            const prevVal = prevVars[name];
+            if (prevVal?.kind === 'char' && prevVal.value !== val.value) {
+              for (let ci = 0; ci < val.value.length; ci++) {
+                if (val.value[ci] !== prevVal.value[ci]) { lastWrite = ci; break; }
+              }
+            }
+            return (
+              <div key={name} className="px-1.5 pb-1">
+                <StringViz
+                  name={name}
+                  value={val.value}
+                  lastWrite={lastWrite}
+                  pointers={pointers}
+                />
+              </div>
+            );
+          }
+
           return (
             <StackVariable
               key={name}

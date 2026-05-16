@@ -7,14 +7,14 @@ const CELL_H = 32;
 
 export interface ArrayPointer { name: string; idx: number }
 
-const POINTER_COLORS: Record<string, string> = {
+export const POINTER_COLORS: Record<string, string> = {
   left: '#67e8f9', lo: '#67e8f9', l: '#67e8f9', start: '#67e8f9', slow: '#67e8f9',
   right: '#c4b5fd', hi: '#c4b5fd', r: '#c4b5fd', end: '#c4b5fd', fast: '#c4b5fd',
   mid: '#fbbf24', m: '#fbbf24',
   i: '#86efac', j: '#86efac',
   p: '#fb923c', q: '#fb923c',
 };
-function pointerColor(name: string) {
+export function pointerColor(name: string) {
   return POINTER_COLORS[name] ?? '#a1a1aa';
 }
 
