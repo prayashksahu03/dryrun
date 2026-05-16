@@ -13,65 +13,71 @@ interface Arrow {
 }
 
 function liftAmount(from: { x: number; y: number }, to: { x: number; y: number }) {
-  return Math.max(65, Math.abs(to.x - from.x) * 0.6 + Math.abs(to.y - from.y) * 0.4);
+  return Math.max(70, Math.abs(to.x - from.x) * 0.65 + Math.abs(to.y - from.y) * 0.4);
 }
 
+// Three routing modes:
+//  'above'         — arc up over the blocks (unused currently, kept for future)
+//  'below'         — arc below the blocks (back-references, self-pointers)
+//  forceVertical   — go straight down first, then curve (stack→heap)
+//  default         — horizontal bezier (forward heap links)
 function bezier(
   from: { x: number; y: number },
   to:   { x: number; y: number },
-  arcAbove?: boolean,
+  arc?: 'above' | 'below',
   forceVertical?: boolean,
 ): string {
   const dx = to.x - from.x;
   const dy = to.y - from.y;
 
-  if (arcAbove) {
-    // Arc up and over — for heap back-references and self-pointers
-    const lift  = liftAmount(from, to);
-    const ctrlY = Math.min(from.y, to.y) - lift;
+  if (arc === 'above') {
+    const ctrlY = Math.min(from.y, to.y) - liftAmount(from, to);
     return `M ${from.x} ${from.y} C ${from.x} ${ctrlY}, ${to.x} ${ctrlY}, ${to.x} ${to.y}`;
   }
 
-  // forceVertical: used for stack→heap arrows so they go straight down first
-  // then curve to the target, regardless of the dx/dy aspect ratio.
+  if (arc === 'below') {
+    const ctrlY = Math.max(from.y, to.y) + liftAmount(from, to);
+    return `M ${from.x} ${from.y} C ${from.x} ${ctrlY}, ${to.x} ${ctrlY}, ${to.x} ${to.y}`;
+  }
+
+  // Stack→heap: go straight down first so the path stays in its own corridor above the blocks.
   if (forceVertical || Math.abs(dy) > Math.abs(dx) * 0.6) {
     const cy = Math.max(Math.abs(dy) * 0.45, 24);
     return `M ${from.x} ${from.y} C ${from.x} ${from.y + cy}, ${to.x} ${to.y - cy}, ${to.x} ${to.y}`;
   }
 
-  // Heap→heap forward arrows (linked list, same row): use horizontal control points.
+  // Heap→heap forward: horizontal S-curve.
   return `M ${from.x} ${from.y} C ${from.x + dx * 0.55} ${from.y}, ${from.x + dx * 0.45} ${to.y}, ${to.x} ${to.y}`;
 }
 
-// Compute the visual midpoint of the arc-above bezier for label placement.
-// At t=0.5: B = 0.125*P0 + 0.375*P1 + 0.375*P2 + 0.125*P3
-function arcMid(from: { x: number; y: number }, to: { x: number; y: number }) {
+// Bezier midpoint at t=0.5: 0.125*P0 + 0.375*P1 + 0.375*P2 + 0.125*P3
+// For arc beziers both control points share ctrlY, so x_mid = (from.x+to.x)/2,
+// y_mid = 0.125*(from.y+to.y) + 0.75*ctrlY. Offset label toward the inside of the arc.
+function arcMid(
+  from: { x: number; y: number },
+  to:   { x: number; y: number },
+  arc: 'above' | 'below',
+): { x: number; y: number } {
   const lift  = liftAmount(from, to);
-  const ctrlY = Math.min(from.y, to.y) - lift;
+  const ctrlY = arc === 'above'
+    ? Math.min(from.y, to.y) - lift
+    : Math.max(from.y, to.y) + lift;
   return {
     x: (from.x + to.x) / 2,
-    y: 0.125 * (from.y + to.y) + 0.75 * ctrlY + 14, // +14: label just below arc peak
+    y: 0.125 * (from.y + to.y) + 0.75 * ctrlY + (arc === 'above' ? 14 : -14),
   };
 }
 
-function midpoint(
-  from: { x: number; y: number },
-  to:   { x: number; y: number },
-) {
+function midpoint(from: { x: number; y: number }, to: { x: number; y: number }) {
   return { x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 };
 }
 
-function rectEdge(rect: DOMRect, side: 'left' | 'right' | 'top', canvas: DOMRect) {
-  if (side === 'top') {
-    return {
-      x: rect.left + rect.width / 2 - canvas.left,
-      y: rect.top - canvas.top,
-    };
+function rectEdge(rect: DOMRect, side: 'left' | 'right' | 'top' | 'bottom', canvas: DOMRect) {
+  switch (side) {
+    case 'top':    return { x: rect.left + rect.width / 2 - canvas.left, y: rect.top    - canvas.top };
+    case 'bottom': return { x: rect.left + rect.width / 2 - canvas.left, y: rect.bottom - canvas.top };
+    default:       return { x: (side === 'right' ? rect.right : rect.left) - canvas.left, y: rect.top + rect.height / 2 - canvas.top };
   }
-  return {
-    x: (side === 'right' ? rect.right : rect.left) - canvas.left,
-    y: rect.top + rect.height / 2 - canvas.top,
-  };
 }
 
 export default function ArrowLayer({ tick }: { tick: number }) {
@@ -103,16 +109,13 @@ export default function ArrowLayer({ tick }: { tick: number }) {
     ) => {
       const srcEl = getEl(srcKey);
       if (!srcEl) return;
-
       const srcRect = srcEl.getBoundingClientRect();
-      // Skip when the source variable is scrolled out of the canvas viewport
-      // (e.g. older stack frames scrolled above the stack zone boundary)
       if (!inCanvasBounds(srcRect)) return;
 
       const from = rectEdge(srcRect, 'right', canvasRect);
 
       if (!targetAddr) {
-        const to = { x: from.x + 18, y: from.y + 20 };
+        const to  = { x: from.x + 18, y: from.y + 20 };
         const mid = midpoint(from, to);
         computed.push({ id, label, path: bezier(from, to), midX: mid.x, midY: mid.y - 6, state: 'null' });
         return;
@@ -120,76 +123,66 @@ export default function ArrowLayer({ tick }: { tick: number }) {
 
       const tgtEl = getEl(`heap:${targetAddr}`);
       if (!tgtEl) return;
-
       const tgtRect = tgtEl.getBoundingClientRect();
       if (!inCanvasBounds(tgtRect)) return;
 
-      const isFreed = heap[targetAddr]?.state === 'freed';
-
-      // Self-pointer: source field lives inside the target block
-      const isSelf = isHeapArrow && srcKey.startsWith(`heap:${targetAddr}:`);
-      // Back-reference: target block is to the left of the source (circular / reverse link)
+      const isFreed   = heap[targetAddr]?.state === 'freed';
+      const isSelf    = isHeapArrow && srcKey.startsWith(`heap:${targetAddr}:`);
       const isBackRef = isHeapArrow && !isSelf && tgtRect.right < srcRect.left;
-      const arcAbove  = isSelf || isBackRef;
 
       let to: { x: number; y: number };
       let mid: { x: number; y: number };
+      let path: string;
 
-      if (arcAbove) {
-        // Curve up and over — land on top of target so the arrow arrives cleanly from above
-        to  = rectEdge(tgtRect, 'top', canvasRect);
-        mid = arcMid(from, to);
-      } else {
-        // Stack→heap: always land on top and go vertically (down-first arc).
-        // Heap→heap forward: land on top when there's a big vertical gap, else left edge.
-        const landOnTop = !isHeapArrow || (tgtRect.top - srcRect.bottom) > 40;
-        to  = rectEdge(tgtRect, landOnTop ? 'top' : 'left', canvasRect);
+      if (isSelf || isBackRef) {
+        // ── Corridor 3: below the blocks ──────────────────────────────────
+        // Arcs under the heap blocks — completely separate from the stack
+        // arrows descending from above and the forward links at block level.
+        to   = rectEdge(tgtRect, 'bottom', canvasRect);
+        mid  = arcMid(from, to, 'below');
+        path = bezier(from, to, 'below');
+
+      } else if (!isHeapArrow) {
+        // ── Corridor 1: stack→heap, descend from above ────────────────────
+        // Go straight down first so both stack arrows stay in parallel lanes
+        // without crossing the heap-to-heap forward links.
+        to   = rectEdge(tgtRect, 'top', canvasRect);
         const rawMid = midpoint(from, to);
-        mid = { x: rawMid.x, y: rawMid.y - 8 };
+        mid  = { x: rawMid.x, y: rawMid.y - 8 };
+        path = bezier(from, to, undefined, true /* forceVertical */);
+
+      } else {
+        // ── Corridor 2: heap→heap forward link ────────────────────────────
+        // Horizontal at block level; land on left (or top when significantly below).
+        const landOnTop = (tgtRect.top - srcRect.bottom) > 40;
+        to   = rectEdge(tgtRect, landOnTop ? 'top' : 'left', canvasRect);
+        const rawMid = midpoint(from, to);
+        mid  = { x: rawMid.x, y: rawMid.y - 8 };
+        path = bezier(from, to);
       }
 
-      computed.push({
-        id, label,
-        path: bezier(from, to, arcAbove, !isHeapArrow),
-        midX: mid.x, midY: mid.y,
-        state: isFreed ? 'freed' : 'valid',
-      });
+      computed.push({ id, label, path, midX: mid.x, midY: mid.y, state: isFreed ? 'freed' : 'valid' });
     };
 
     // Only draw pointer arrows from the innermost (topmost) active frame.
-    // Drawing from every frame simultaneously causes overlapping sweeping arrows
-    // across the memory boundary during deep recursion.
     const stack = frame.memory.stack;
     const activeFrames = stack.length <= 1
-      ? stack                                    // single frame: just show it
-      : [stack[0], stack[stack.length - 1]];    // outermost (main) + innermost (current fn)
+      ? stack
+      : [stack[0], stack[stack.length - 1]];
 
     activeFrames.forEach(sf => {
       Object.entries(sf.variables).forEach(([varName, val]) => {
         if (val.kind === 'pointer') {
-          addArrow(
-            `s:${sf.function}:${varName}`,
-            varName,
-            `stack:${sf.function}:${varName}`,
-            val.address,
-            false,
-          );
+          addArrow(`s:${sf.function}:${varName}`, varName, `stack:${sf.function}:${varName}`, val.address, false);
         }
       });
     });
 
-    // Heap pointer fields (e.g. a->next pointing to b)
     Object.entries(heap).forEach(([addr, block]) => {
       if (block.state === 'freed') return;
       Object.entries(block.fields).forEach(([field, val]) => {
         if (val.kind === 'pointer' && val.address !== null) {
-          addArrow(
-            `h:${addr}:${field}`,
-            `→${field}`,
-            `heap:${addr}:${field}`,
-            val.address,
-            true,
-          );
+          addArrow(`h:${addr}:${field}`, `→${field}`, `heap:${addr}:${field}`, val.address, true);
         }
       });
     });
@@ -207,58 +200,26 @@ export default function ArrowLayer({ tick }: { tick: number }) {
     >
       <defs>
         {(['valid', 'freed', 'null'] as const).map(s => (
-          <marker
-            key={s}
-            id={`ah-${s}`}
-            markerWidth="7" markerHeight="7"
-            refX="5" refY="3.5"
-            orient="auto"
-          >
+          <marker key={s} id={`ah-${s}`} markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
             <path d="M0,0.5 L6,3.5 L0,6.5 Z" fill={colorOf(s)} />
           </marker>
         ))}
       </defs>
 
       {arrows.map(arrow => {
-        const color   = colorOf(arrow.state);
-        const isDash  = arrow.state === 'freed';
-
+        const color  = colorOf(arrow.state);
+        const isDash = arrow.state === 'freed';
         return (
           <g key={arrow.id}>
-            {/* Soft glow */}
-            <motion.path
-              d={arrow.path}
-              animate={{ d: arrow.path }}
-              transition={{ duration: 0.38, ease: 'easeInOut' }}
-              stroke={color}
-              strokeWidth={5}
-              fill="none"
-              opacity={0.10}
-              strokeLinecap="round"
-            />
-            {/* Arrow line */}
-            <motion.path
-              d={arrow.path}
-              animate={{ d: arrow.path }}
-              transition={{ duration: 0.38, ease: 'easeInOut' }}
-              stroke={color}
-              strokeWidth={1.5}
-              fill="none"
+            <motion.path d={arrow.path} animate={{ d: arrow.path }} transition={{ duration: 0.38, ease: 'easeInOut' }}
+              stroke={color} strokeWidth={5} fill="none" opacity={0.10} strokeLinecap="round" />
+            <motion.path d={arrow.path} animate={{ d: arrow.path }} transition={{ duration: 0.38, ease: 'easeInOut' }}
+              stroke={color} strokeWidth={1.5} fill="none"
               strokeDasharray={isDash ? '5 3' : undefined}
               markerEnd={`url(#ah-${arrow.state})`}
-              strokeLinecap="round"
-              opacity={0.9}
-            />
-            {/* Label */}
-            <motion.text
-              animate={{ x: arrow.midX, y: arrow.midY }}
-              transition={{ duration: 0.38, ease: 'easeInOut' }}
-              fill={color}
-              fontSize={9}
-              fontFamily="JetBrains Mono, monospace"
-              textAnchor="middle"
-              opacity={0.65}
-            >
+              strokeLinecap="round" opacity={0.9} />
+            <motion.text animate={{ x: arrow.midX, y: arrow.midY }} transition={{ duration: 0.38, ease: 'easeInOut' }}
+              fill={color} fontSize={9} fontFamily="JetBrains Mono, monospace" textAnchor="middle" opacity={0.65}>
               {arrow.label}
             </motion.text>
           </g>
