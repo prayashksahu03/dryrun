@@ -180,7 +180,8 @@ function EditorMode() {
         {/* Line gutter */}
         <div
           ref={gutterRef}
-          className="flex-shrink-0 w-10 text-right py-3 pr-2 text-xs font-mono leading-relaxed select-none overflow-hidden bg-[#0d0d0f] pointer-events-none"
+          className="gutter-no-scrollbar flex-shrink-0 w-10 text-right py-3 pr-2 text-xs font-mono leading-relaxed select-none bg-[#0d0d0f] pointer-events-none"
+          style={{ overflowY: 'scroll', scrollbarWidth: 'none' }}
           aria-hidden
         >
           {lines.map((_, i) => {
@@ -237,6 +238,10 @@ function EditorMode() {
           value={editorSource}
           onChange={e => { clearTrace(); setEditorSource(e.target.value); }}
           onKeyDown={handleKeyDown}
+          onScroll={() => {
+            if (gutterRef.current && textareaRef.current)
+              gutterRef.current.scrollTop = textareaRef.current.scrollTop;
+          }}
           spellCheck={false}
           className="flex-1 bg-transparent text-zinc-300 text-xs font-mono leading-[1.6rem] py-3 pr-4 resize-none outline-none border-none relative z-10"
           style={{ caretColor: '#c084fc' }}

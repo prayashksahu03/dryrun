@@ -31,6 +31,11 @@ html, body, #root {
   background: #52525b;
 }
 
+/* Hide scrollbar on the line-number gutter (synced programmatically) */
+.gutter-no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 /* Arrow glow */
 .arrow-valid {
   filter: drop-shadow(0 0 3px rgba(34, 197, 94, 0.4));
