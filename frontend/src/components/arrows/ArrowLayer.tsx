@@ -41,6 +41,18 @@ function rectEdge(rect: DOMRect, side: 'left' | 'right' | 'top' | 'bottom', canv
   }
 }
 
+// Pending back-ref/self arrow, collected before paths are computed so yFloor can be staggered.
+interface BackRefPending {
+  id: string;
+  label: string;
+  from: { x: number; y: number };
+  to: { x: number; y: number };
+  blockBottom: number; // bottom of the source block (canvas-relative)
+  tgtBottom: number;   // bottom of the target block (canvas-relative)
+  state: Arrow['state'];
+  span: number;        // euclidean-ish distance used to sort lanes
+}
+
 export default function ArrowLayer({ tick }: { tick: number }) {
   const { getEl, canvasRef } = useRefRegistry();
   const { currentFrame }      = useExecutionStore();
@@ -55,7 +67,8 @@ export default function ArrowLayer({ tick }: { tick: number }) {
     if (!frame) { setArrows([]); return; }
 
     const heap = frame.memory.heap;
-    const computed: Arrow[] = [];
+    const computed: Arrow[]         = [];
+    const backRefs: BackRefPending[] = [];
 
     const inCanvasBounds = (rect: DOMRect) =>
       rect.bottom >= canvasRect.top && rect.top <= canvasRect.bottom &&
@@ -90,45 +103,30 @@ export default function ArrowLayer({ tick }: { tick: number }) {
       const isSelf    = isHeapArrow && srcKey.startsWith(`heap:${targetAddr}:`);
       const isBackRef = isHeapArrow && !isSelf && tgtRect.right < srcRect.left;
 
-      let path: string;
-      let midX: number;
-      let midY: number;
-
       if (isSelf || isBackRef) {
-        // ── Corridor 3: orthogonal U below blocks ──────────────────────────
-        // Completely separate from the corridors above (stack arrows land on
-        // block tops, forward links at block mid-level, back-refs go under).
+        // ── Corridor 3: collect for staggered yFloor assignment ────────────
         const srcBlockEl = getEl(srcKey.replace(/:([^:]+)$/, ''));
-        const srcBlockBottom = srcBlockEl
+        const blockBottom = (srcBlockEl
           ? srcBlockEl.getBoundingClientRect().bottom
-          : srcRect.bottom;
-        const yFloor = Math.max(srcBlockBottom, tgtRect.bottom) - canvasRect.top + 28;
+          : srcRect.bottom) - canvasRect.top;
+        const tgtBottom = tgtRect.bottom - canvasRect.top;
         const to = rectEdge(tgtRect, 'bottom', canvasRect);
-        path = orthoPath(from, to, yFloor);
-        midX = (from.x + to.x) / 2;
-        midY = yFloor - 8;
+        const span = Math.abs(from.x - to.x) + Math.abs(from.y - to.y);
+        backRefs.push({ id, label, from, to, blockBottom, tgtBottom, state: isFreed ? 'freed' : 'valid', span });
 
       } else if (!isHeapArrow) {
         // ── Corridor 1: stack→heap L-shape ────────────────────────────────
-        // Each variable exits at its own y-level (from.y), travels horizontally
-        // to the block's x column, then drops vertically to the block top.
-        // Since each arrow uses a unique y for the horizontal arm, no two arms
-        // ever share a segment — guaranteed non-overlap.
         const to = rectEdge(tgtRect, 'top', canvasRect);
-        path = lPath(from, to);
-        midX = (from.x + to.x) / 2;  // middle of the horizontal arm
-        midY = from.y - 8;             // label just above the horizontal arm
+        const path = lPath(from, to);
+        computed.push({ id, label, path, midX: (from.x + to.x) / 2, midY: from.y - 8, state: isFreed ? 'freed' : 'valid' });
 
       } else {
         // ── Corridor 2: heap→heap forward link ────────────────────────────
         const landOnTop = (tgtRect.top - srcRect.bottom) > 40;
         const to = rectEdge(tgtRect, landOnTop ? 'top' : 'left', canvasRect);
-        path = straightPath(from, to);
-        midX = (from.x + to.x) / 2;
-        midY = (from.y + to.y) / 2 - 8;
+        const path = straightPath(from, to);
+        computed.push({ id, label, path, midX: (from.x + to.x) / 2, midY: (from.y + to.y) / 2 - 8, state: isFreed ? 'freed' : 'valid' });
       }
-
-      computed.push({ id, label, path, midX, midY, state: isFreed ? 'freed' : 'valid' });
     };
 
     const stack = frame.memory.stack;
@@ -149,6 +147,18 @@ export default function ArrowLayer({ tick }: { tick: number }) {
           addArrow(`h:${addr}:${field}`, `→${field}`, `heap:${addr}:${field}`, val.address, true);
         }
       });
+    });
+
+    // ── Corridor 3: assign staggered yFloor lanes ──────────────────────────
+    // Sort ascending by span so shorter arcs get shallower lanes and longer
+    // arcs nest below them — a clean "railroad" with no overlaps.
+    const Y_LANE_STEP = 18;
+    backRefs.sort((a, b) => a.span - b.span);
+    const globalBlockFloor = backRefs.reduce((m, r) => Math.max(m, r.blockBottom, r.tgtBottom), 0);
+    backRefs.forEach((r, i) => {
+      const yFloor = globalBlockFloor + 24 + i * Y_LANE_STEP;
+      const path   = orthoPath(r.from, r.to, yFloor);
+      computed.push({ id: r.id, label: r.label, path, midX: (r.from.x + r.to.x) / 2, midY: yFloor - 8, state: r.state });
     });
 
     setArrows(computed);
