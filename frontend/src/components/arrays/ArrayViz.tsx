@@ -1,4 +1,5 @@
 import { motion } from 'framer-motion';
+import { useRef, useEffect } from 'react';
 
 const CELL_W = 36;
 const CELL_H = 32;
@@ -53,9 +54,7 @@ function Array1D({
   pointers?: ArrayPointer[];
 }) {
   const hi = lastWrite?.length === 1 ? lastWrite[0] : -1;
-  const MAX_SHOW = 24;
-  const shown = values.slice(0, MAX_SHOW);
-  const clipped = values.length > MAX_SHOW;
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   // Group pointers by index for quick lookup
   const ptrMap = new Map<number, ArrayPointer[]>();
@@ -66,6 +65,17 @@ function Array1D({
   });
   const hasPointers = ptrMap.size > 0;
 
+  // Scroll to keep the active pointer (or last-write highlight) in view
+  const focusIdx = pointers && pointers.length > 0
+    ? Math.max(...pointers.map(p => p.idx))
+    : hi >= 0 ? hi : -1;
+
+  useEffect(() => {
+    if (focusIdx < 0 || !scrollRef.current) return;
+    const cell = scrollRef.current.children[focusIdx] as HTMLElement | undefined;
+    cell?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+  }, [focusIdx]);
+
   return (
     <div className="mt-1.5 mb-0.5">
       <div className="text-[9px] font-mono text-zinc-600 mb-1">
@@ -73,68 +83,60 @@ function Array1D({
         <span className="text-zinc-700 ml-1">[{values.length}]</span>
       </div>
 
-      <div className="flex items-end gap-0">
-        {shown.map((v, i) => {
-          const isHi = i === hi;
-          const ptrs = ptrMap.get(i);
-          const isPointed = !!ptrs?.length;
+      <div className="overflow-x-auto" style={{ scrollbarWidth: 'thin', scrollbarColor: '#3f3f46 transparent' }}>
+        <div ref={scrollRef} className="flex items-end gap-0" style={{ width: 'max-content' }}>
+          {values.map((v, i) => {
+            const isHi = i === hi;
+            const ptrs = ptrMap.get(i);
+            const isPointed = !!ptrs?.length;
 
-          return (
-            <div key={i} className="flex flex-col items-center" style={{ minWidth: CELL_W }}>
-              {/* Pointer labels */}
-              {hasPointers && (
-                <div className="flex flex-col items-center" style={{ minHeight: 20 }}>
-                  {ptrs?.map(p => (
-                    <span key={p.name} className="text-[8px] font-mono leading-tight"
-                      style={{ color: pointerColor(p.name) }}>
-                      {p.name}
-                    </span>
-                  ))}
-                </div>
-              )}
-              {/* Downward arrow */}
-              {hasPointers && (
-                <div style={{ height: 8, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  {isPointed && (
-                    <span className="text-[8px]" style={{ color: pointerColor(ptrs![0].name), lineHeight: 1 }}>▼</span>
-                  )}
-                </div>
-              )}
-              {/* Index label */}
-              <span className="text-[8px] font-mono text-zinc-700 mb-0.5">{i}</span>
-              {/* Cell */}
-              <motion.div
-                animate={{
-                  background: isPointed
-                    ? `${pointerColor(ptrs![0].name)}18`
-                    : isHi ? 'rgba(251,191,36,0.18)' : 'rgba(24,24,27,0.9)',
-                  borderColor: isPointed
-                    ? `${pointerColor(ptrs![0].name)}80`
-                    : isHi ? 'rgba(251,191,36,0.6)' : 'rgba(63,63,70,0.5)',
-                }}
-                transition={{ duration: 0.2 }}
-                className="flex items-center justify-center text-[10px] font-mono font-semibold border"
-                style={{
-                  width: CELL_W - 1,
-                  height: CELL_H,
-                  color: isPointed ? pointerColor(ptrs![0].name) : isHi ? '#fbbf24' : '#a1a1aa',
-                }}
-              >
-                {fmtCell(v as AnyVal)}
-              </motion.div>
-            </div>
-          );
-        })}
-        {clipped && (
-          <div className="flex flex-col items-center" style={{ minWidth: 28 }}>
-            {hasPointers && <div style={{ minHeight: 28 }} />}
-            <span className="text-[8px] font-mono text-zinc-700 mb-0.5"> </span>
-            <div className="flex items-center justify-center text-[9px] font-mono text-zinc-700"
-              style={{ width: 28, height: CELL_H }}>
-              +{values.length - MAX_SHOW}
-            </div>
-          </div>
-        )}
+            return (
+              <div key={i} className="flex flex-col items-center" style={{ minWidth: CELL_W }}>
+                {/* Pointer labels */}
+                {hasPointers && (
+                  <div className="flex flex-col items-center" style={{ minHeight: 20 }}>
+                    {ptrs?.map(p => (
+                      <span key={p.name} className="text-[8px] font-mono leading-tight"
+                        style={{ color: pointerColor(p.name) }}>
+                        {p.name}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {/* Downward arrow */}
+                {hasPointers && (
+                  <div style={{ height: 8, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    {isPointed && (
+                      <span className="text-[8px]" style={{ color: pointerColor(ptrs![0].name), lineHeight: 1 }}>▼</span>
+                    )}
+                  </div>
+                )}
+                {/* Index label */}
+                <span className="text-[8px] font-mono text-zinc-700 mb-0.5">{i}</span>
+                {/* Cell */}
+                <motion.div
+                  animate={{
+                    background: isPointed
+                      ? `${pointerColor(ptrs![0].name)}18`
+                      : isHi ? 'rgba(251,191,36,0.18)' : 'rgba(24,24,27,0.9)',
+                    borderColor: isPointed
+                      ? `${pointerColor(ptrs![0].name)}80`
+                      : isHi ? 'rgba(251,191,36,0.6)' : 'rgba(63,63,70,0.5)',
+                  }}
+                  transition={{ duration: 0.2 }}
+                  className="flex items-center justify-center text-[10px] font-mono font-semibold border"
+                  style={{
+                    width: CELL_W - 1,
+                    height: CELL_H,
+                    color: isPointed ? pointerColor(ptrs![0].name) : isHi ? '#fbbf24' : '#a1a1aa',
+                  }}
+                >
+                  {fmtCell(v as AnyVal)}
+                </motion.div>
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
