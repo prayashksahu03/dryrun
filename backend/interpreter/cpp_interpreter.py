@@ -2498,13 +2498,16 @@ class CppInterpreter:
             struct_name = 'unknown'
             if arg_cursors:
                 import re as _re
-                # Most reliable: parse tokens of the sizeof expression for the type name
-                tok = arg_cursors[0].spelling or ''
+                # Get actual source text via tokens (cursor.spelling is empty for sizeof exprs)
+                try:
+                    tok = ' '.join(t.spelling for t in arg_cursors[0].get_tokens())
+                except Exception:
+                    tok = ''
                 m = _re.search(r'sizeof\s*\(\s*(?:struct\s+|class\s+)?(\w+)\s*\)', tok)
                 if m and m.group(1) in self.class_defs:
                     struct_name = m.group(1)
                 else:
-                    # Fallback: walk cursor tree for TYPE_REF
+                    # Fallback: walk cursor tree for TYPE_REF or child type spellings
                     def _find_type_ref(cur):
                         for c in self._ch(cur):
                             if c.kind == CK.TYPE_REF:
