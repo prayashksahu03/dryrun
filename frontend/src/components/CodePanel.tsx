@@ -97,6 +97,7 @@ function EditorMode() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const activeLineRef = useRef<HTMLDivElement>(null);
   const gutterRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
   const [stdinOpen, setStdinOpen] = useState(true);
   const errorLine   = error ? parseErrorLine(error) : null;
   const errorType   = error ? parseErrorType(error) : null;
@@ -201,7 +202,7 @@ function EditorMode() {
           <div
             className="absolute pointer-events-none z-0"
             style={{
-              top: `calc(0.75rem + ${(currentLine - 1) * 1.6}rem)`,
+              top: `calc(0.75rem + ${(currentLine - 1) * 1.6}rem - ${scrollTop}px)`,
               left: 40,
               right: 0,
               height: '1.6rem',
@@ -216,7 +217,7 @@ function EditorMode() {
           <div
             className="absolute pointer-events-none z-0"
             style={{
-              top: `calc(0.75rem + ${(errorLine - 1) * 1.6}rem)`,
+              top: `calc(0.75rem + ${(errorLine - 1) * 1.6}rem - ${scrollTop}px)`,
               left: 40,
               right: 0,
               height: '1.6rem',
@@ -232,8 +233,10 @@ function EditorMode() {
           onChange={e => { clearTrace(); setEditorSource(e.target.value); }}
           onKeyDown={handleKeyDown}
           onScroll={() => {
-            if (gutterRef.current && textareaRef.current)
+            if (gutterRef.current && textareaRef.current) {
               gutterRef.current.scrollTop = textareaRef.current.scrollTop;
+              setScrollTop(textareaRef.current.scrollTop);
+            }
           }}
           spellCheck={false}
           className="flex-1 bg-transparent text-zinc-300 text-xs font-mono leading-[1.6rem] py-3 pr-4 resize-none outline-none border-none relative z-10"
