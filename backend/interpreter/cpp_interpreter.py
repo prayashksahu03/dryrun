@@ -1937,14 +1937,14 @@ class CppInterpreter:
         return {'kind': 'pointer', 'address': addr}
 
     def _eval_delete(self, cursor) -> dict:
-        line = cursor.location.line
+        raw_line = cursor.location.line
         ch   = self._ch(cursor)
         if ch:
             ptr_val = self._eval(ch[0])
             addr    = ptr_val.get('address') if isinstance(ptr_val, dict) else None
-            self.memory.free(addr, line)
-            self.memory.update_line(line)
-            self._emit(line, f"delete {addr}.",
+            self.memory.free(addr, self._adj(raw_line))   # adjusted so freedAtLine is user-visible
+            self.memory.update_line(raw_line)
+            self._emit(raw_line, f"delete {addr}.",
                        {'type': 'free', 'address': addr})
         return _INT(0)
 
@@ -2655,7 +2655,7 @@ class CppInterpreter:
             return {'kind': 'pointer', 'address': addr}
         if fn_name == 'free' and args:
             addr = args[0].get('address') if isinstance(args[0], dict) else None
-            self.memory.free(addr, line)
+            self.memory.free(addr, self._adj(line))   # adjusted so freedAtLine is user-visible
             self.memory.update_line(line)
             self._emit(line, f"free({addr}).", {'type': 'free', 'address': addr})
             return _INT(0)
