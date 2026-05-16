@@ -228,6 +228,7 @@ namespace std {
   typedef long long ll;
 }
 using namespace std;
+#define NULL 0
 typedef long long ll;
 typedef unsigned long long ull;
 const int INT_MAX = 2147483647;
@@ -243,6 +244,13 @@ void* calloc(unsigned long count, unsigned long size);
 void* realloc(void* ptr, unsigned long size);
 void  free(void* ptr);
 void  assert(int cond);
+unsigned long strlen(const char* s);
+char* strcpy(char* dst, const char* src);
+char* strcat(char* dst, const char* src);
+int   strcmp(const char* a, const char* b);
+void* memset(void* ptr, int val, unsigned long n);
+void* memcpy(void* dst, const void* src, unsigned long n);
+int   atoi(const char* s);
 """
 _STUBS_LINES = _STUBS.count('\n')   # stubs end with \n; body starts on the next line
 
@@ -742,8 +750,10 @@ class CppInterpreter:
                     non_tr = [c for c in children
                               if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF)]
                     if non_tr:
-                        uw = self._unwrap(non_tr[0]) or non_tr[0]
-                        val = self._eval(uw)
+                        val = self._eval(non_tr[0])
+                        # NULL (defined as 0) → coerce to null pointer
+                        if isinstance(val, dict) and val.get('kind') == 'int' and val.get('value') == 0:
+                            val = {'kind': 'pointer', 'address': None}
             self.memory.declare_var(name, val)
             self.memory.update_line(line)
             self._emit(line, f"Declare {name} = {self._fmt(val)}.",
@@ -1207,7 +1217,17 @@ class CppInterpreter:
             if ptr.get('kind') != 'pointer':
                 # * on a non-pointer (e.g. result of max_element): return the value itself
                 return ptr
-            return self.memory.read_via_addr(ptr.get('address'), line)
+            addr = ptr.get('address')
+            offset = ptr.get('offset', 0)
+            if offset and addr and addr in self.memory.heap:
+                block = self.memory.heap[addr]
+                arr = block['fields'].get('_arr')
+                if arr and arr.get('kind') == 'array':
+                    vals = arr.get('values', [])
+                    if 0 <= offset < len(vals):
+                        v = vals[offset]
+                        return v if isinstance(v, dict) else _INT(int(v))
+            return self.memory.read_via_addr(addr, line)
         if op == '&':
             if ch[0].kind == CK.DECL_REF_EXPR:
                 try:
@@ -1218,13 +1238,19 @@ class CppInterpreter:
         if op in ('++', '--'):                  # prefix
             val     = self._eval(ch[0])
             delta   = 1 if op == '++' else -1
-            new_val = _INT(self._to_int(val) + delta)
+            if isinstance(val, dict) and val.get('kind') == 'pointer':
+                new_val = self._pointer_advance(val, delta, line)
+            else:
+                new_val = _INT(self._to_int(val) + delta)
             self._write_lval(ch[0], new_val, line)
             return new_val
         if op in ('p++', 'p--'):                # postfix
             val     = self._eval(ch[0])
             delta   = 1 if op == 'p++' else -1
-            new_val = _INT(self._to_int(val) + delta)
+            if isinstance(val, dict) and val.get('kind') == 'pointer':
+                new_val = self._pointer_advance(val, delta, line)
+            else:
+                new_val = _INT(self._to_int(val) + delta)
             self._write_lval(ch[0], new_val, line)
             return val                          # return old value
 
@@ -2020,6 +2046,12 @@ class CppInterpreter:
                                 'value': self._fmt(rval)})
 
     def _write_member_ref(self, cursor, rval, line: int):
+        # NULL (defined as 0) assigned to a pointer field → coerce to null pointer
+        field_type = cursor.type.spelling if cursor.type else ''
+        if ('*' in field_type and isinstance(rval, dict) and rval.get('kind') == 'int'
+                and rval.get('value') == 0):
+            rval = {'kind': 'pointer', 'address': None}
+
         field = cursor.spelling
         ch    = self._ch(cursor)
 
@@ -2497,6 +2529,70 @@ class CppInterpreter:
             return self._make_pair(args[0], args[1])
         if fn_name == 'pair' and len(args) >= 2:
             return self._make_pair(args[0], args[1])
+        if fn_name in ('strlen', 'std::strlen') and args:
+            sv = args[0].get('value', '') if isinstance(args[0], dict) else ''
+            if isinstance(sv, str):
+                return _INT(len(sv.rstrip('\0')))
+            if isinstance(args[0], dict) and args[0].get('kind') == 'array':
+                # char array stored as int array — count non-zero elements
+                vals = args[0].get('values', [])
+                count = sum(1 for v in vals if self._to_int(v) != 0)
+                return _INT(count)
+            return _INT(0)
+
+        if fn_name in ('strcpy', 'std::strcpy') and len(args) >= 2 and arg_cursors:
+            src = args[1].get('value', '') if isinstance(args[1], dict) else ''
+            dest_c = arg_cursors[0] if arg_cursors else None
+            if dest_c is not None:
+                self._write_lval(dest_c, {'kind': 'char', 'value': src}, line)
+            return args[0] if args else _INT(0)
+
+        if fn_name in ('strcat', 'std::strcat') and len(args) >= 2 and arg_cursors:
+            dest_val = args[0]
+            src_val = args[1]
+            ds = dest_val.get('value', '') if isinstance(dest_val, dict) else ''
+            ss = src_val.get('value', '') if isinstance(src_val, dict) else ''
+            new_val = {'kind': 'char', 'value': ds + ss}
+            dest_c = arg_cursors[0] if arg_cursors else None
+            if dest_c is not None:
+                self._write_lval(dest_c, new_val, line)
+            return args[0] if args else _INT(0)
+
+        if fn_name in ('strcmp', 'std::strcmp') and len(args) >= 2:
+            ls = args[0].get('value', '') if isinstance(args[0], dict) else ''
+            rs = args[1].get('value', '') if isinstance(args[1], dict) else ''
+            if ls < rs: return _INT(-1)
+            if ls > rs: return _INT(1)
+            return _INT(0)
+
+        if fn_name in ('atoi', 'std::atoi') and args:
+            sv = args[0].get('value', '0') if isinstance(args[0], dict) else '0'
+            try:
+                return _INT(int(str(sv).strip()))
+            except (ValueError, AttributeError):
+                return _INT(0)
+
+        if fn_name in ('memcpy', 'std::memcpy') and len(args) >= 3 and arg_cursors:
+            src_val = args[1] if len(args) > 1 else _INT(0)
+            dest_c = arg_cursors[0] if arg_cursors else None
+            if dest_c is not None and isinstance(src_val, dict):
+                self._write_lval(dest_c, src_val, line)
+            return args[0] if args else _INT(0)
+
+        if fn_name in ('memset', 'std::memset') and len(args) >= 3 and arg_cursors:
+            fill = self._to_int(args[1]) & 0xFF
+            n = self._to_int(args[2])
+            dest_c = arg_cursors[0] if arg_cursors else None
+            dest_val = args[0] if args else None
+            if isinstance(dest_val, dict) and dest_val.get('kind') == 'array':
+                vals = dest_val.get('values', [])
+                for i in range(min(n, len(vals))):
+                    vals[i] = fill
+            elif dest_c is not None:
+                # Try to write a filled string
+                self._write_lval(dest_c, {'kind': 'char', 'value': chr(fill) * n if fill else '\0' * n}, line)
+            return args[0] if args else _INT(0)
+
         if fn_name == 'malloc' and args:
             size  = self._to_int(args[0])
             # Try to extract struct type from sizeof(TypeName) argument
@@ -4002,6 +4098,13 @@ class CppInterpreter:
         type_spell = cursor.type.spelling    # e.g. "int [5]" or "int [3][3]"
         dims       = [int(d) for d in re.findall(r'\[(\d+)\]', type_spell)]
 
+        # char name[] = "hello" — store as a string value, not a zero-filled int array
+        if type_spell.startswith('char') and len(dims) == 1 and children:
+            for child in children:
+                sv = self._extract_string_literal(child)
+                if sv is not None:
+                    return {'kind': 'char', 'value': sv}
+
         # Find the INIT_LIST_EXPR child (the array size literal may also be a child)
         init_c = next(
             (c for c in children if c.kind == CK.INIT_LIST_EXPR),
@@ -4049,6 +4152,19 @@ class CppInterpreter:
             return {'kind': 'array', 'values': vals, 'declared_size': size}
 
         return {'kind': 'array', 'values': []}
+
+    def _extract_string_literal(self, cursor) -> str | None:
+        """Walk cursor tree looking for a STRING_LITERAL; return its string value or None."""
+        if cursor is None:
+            return None
+        if cursor.kind == CK.STRING_LITERAL:
+            val = self._eval_string_lit(cursor)
+            return val.get('value', '')
+        for child in self._ch(cursor):
+            result = self._extract_string_literal(child)
+            if result is not None:
+                return result
+        return None
 
     # ── Operator extraction via tokens ───────────────────────────────────────
 
@@ -4273,6 +4389,25 @@ class CppInterpreter:
             if k == 'iterator': return 0 if val.get('idx') is None else 1
         return 0
 
+    def _pointer_advance(self, ptr: dict, delta: int, line: int) -> dict:
+        """Advance a pointer by delta elements.
+
+        For heap-allocated arrays (blocks with '_arr' field), we track an integer
+        offset inside the block.  For struct pointers we keep the same address (the
+        pointer is now dangling/past-end — future dereferences will crash).
+        """
+        addr = ptr.get('address')
+        offset = ptr.get('offset', 0)
+        new_offset = offset + delta
+        if addr and addr in self.memory.heap:
+            block = self.memory.heap[addr]
+            arr = block['fields'].get('_arr')
+            if arr and arr.get('kind') == 'array':
+                # Pointer into a malloc'd array: track element offset inside the block
+                return {'kind': 'pointer', 'address': addr, 'offset': new_offset}
+        # Struct pointer or unknown — keep address, record offset (used for dangling checks)
+        return {'kind': 'pointer', 'address': addr, 'offset': new_offset}
+
     def _crash(self, line: int, kind: str, message: str):
         """Emit a crash step and raise SegFaultError to stop execution."""
         self.memory.update_line(line)
@@ -4487,7 +4622,27 @@ class CppInterpreter:
             elif spec in ('o',):
                 result.append(oct(n)[2:])
             elif spec == 's':
-                sv = val.get('value', '') if isinstance(val, dict) else str(n)
+                if isinstance(val, dict):
+                    if val.get('kind') == 'char':
+                        sv = val.get('value', '')
+                    elif val.get('kind') == 'array':
+                        # char[] stored as int array — convert non-null elements to chars
+                        sv = ''.join(
+                            chr(self._to_int(v)) if 32 <= self._to_int(v) <= 126 else ''
+                            for v in val.get('values', [])
+                            if self._to_int(v) != 0
+                        )
+                    elif val.get('kind') == 'pointer':
+                        addr = val.get('address')
+                        if addr and addr in self.memory.heap:
+                            fv = self.memory.heap[addr]['fields'].get('value', _INT(0))
+                            sv = fv.get('value', '') if isinstance(fv, dict) else str(self._to_int(fv))
+                        else:
+                            sv = ''
+                    else:
+                        sv = str(n)
+                else:
+                    sv = str(n)
                 result.append(sv)
             elif spec == 'c':
                 result.append(chr(n) if 0 <= n <= 127 else '?')
