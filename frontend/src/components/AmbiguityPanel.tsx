@@ -264,6 +264,36 @@ function AmbiguityCard({
     return <ArrayUnknownCard ambiguity={ambiguity} hint={hint} onChange={onChange} />;
   }
 
+  // ── array_or_dsu ──
+  if (ambiguity.kind === 'array_or_dsu') {
+    return (
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <code className="text-[10px] font-mono px-1.5 py-0.5 rounded"
+            style={{ background: 'rgba(99,102,241,0.12)', color: 'rgba(165,180,252,0.9)', border: '1px solid rgba(99,102,241,0.2)' }}>
+            {ambiguity.varName}
+          </code>
+          <span className="text-zinc-600 text-[9px] font-mono">1D int array · all values in [0, n)</span>
+        </div>
+        <p className="text-zinc-400 text-[10px]">Is this a DSU parent array?</p>
+        <div className="flex gap-2">
+          <OptionPill
+            label="DSU Forest"
+            sub="union-find viz"
+            selected={hint?.kind === 'dsu'}
+            onClick={() => onChange({ kind: 'dsu' })}
+          />
+          <OptionPill
+            label="Plain Array"
+            sub="keep as-is"
+            selected={hint?.kind === 'plain_array'}
+            onClick={() => onChange({ kind: 'plain_array' })}
+          />
+        </div>
+      </div>
+    );
+  }
+
   // ── pair_field_order ──
   if (ambiguity.kind === 'pair_field_order') {
     const [sf, ss] = ambiguity.samplePair ?? [0, 0];

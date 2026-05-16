@@ -77,6 +77,7 @@ export default function StackFrameComponent({
   isActive: boolean;
 }) {
   const prevFrame = useExecutionStore(s => s.prevFrame());
+  const vizHints  = useExecutionStore(s => s.vizHints);
 
   // Find this function's variables in the previous step (matched by function name)
   const prevVars = prevFrame?.memory.stack
@@ -227,6 +228,20 @@ export default function StackFrameComponent({
                   </div>
                 );
               }
+            }
+
+            // User-confirmed DSU via ambiguity panel (name not in DSU_NAMES)
+            if (!val.rows && !val.cols && vizHints[name]?.kind === 'dsu') {
+              return (
+                <div key={name} className="px-1.5 pb-1">
+                  <DSUViz
+                    name={name}
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    values={val.values as any[]}
+                    lastWrite={val.lastWrite}
+                  />
+                </div>
+              );
             }
 
             // BIT/Fenwick array detection
