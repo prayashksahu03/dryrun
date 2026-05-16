@@ -1165,6 +1165,11 @@ class CppInterpreter:
             ):
                 if name in t:
                     return _INT(size)
+            if '*' in t:
+                return _INT(8)
+            base = t.replace('struct ', '').replace('class ', '').strip()
+            if base in self.class_defs:
+                return _INT(self.memory._sizeof(base))
             return _INT(4)  # safe default
 
         if not ch:
@@ -2477,16 +2482,31 @@ class CppInterpreter:
             return self._make_pair(args[0], args[1])
         if fn_name == 'malloc' and args:
             size  = self._to_int(args[0])
-            addr  = self.memory.malloc('unknown', line)
+            # Try to extract struct type from sizeof(TypeName) argument
+            struct_name = 'unknown'
+            if arg_cursors:
+                def _find_type_ref(cur):
+                    for c in self._ch(cur):
+                        if c.kind == CK.TYPE_REF:
+                            return c.spelling.replace('struct ', '').replace('class ', '').strip()
+                        found = _find_type_ref(c)
+                        if found:
+                            return found
+                    return None
+                candidate = _find_type_ref(arg_cursors[0])
+                if not candidate and arg_cursors[0].type:
+                    candidate = arg_cursors[0].type.spelling.replace('struct ', '').replace('class ', '').replace('*', '').strip()
+                if candidate and candidate in self.class_defs:
+                    struct_name = candidate
+            addr  = self.memory.malloc(struct_name, line)
             block = self.memory.heap[addr]
-            # Pre-initialize as an array sized to the allocation so the heap panel
-            # shows the correct number of slots immediately.
-            n_elems = max(1, size // 4) if size > 0 else 1
-            block['fields'] = {'_arr': {'kind': 'array', 'values': [0] * n_elems}}
+            if struct_name == 'unknown':
+                n_elems = max(1, size // 4) if size > 0 else 1
+                block['fields'] = {'_arr': {'kind': 'array', 'values': [0] * n_elems}}
             block['size'] = size
             self._emit(line, f"malloc({size}B) → {addr}.",
                        {'type': 'malloc', 'address': addr,
-                        'size': size, 'typeName': 'unknown'})
+                        'size': size, 'typeName': struct_name})
             return {'kind': 'pointer', 'address': addr}
         if fn_name == 'free' and args:
             addr = args[0].get('address') if isinstance(args[0], dict) else None
