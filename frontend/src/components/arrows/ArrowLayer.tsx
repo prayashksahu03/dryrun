@@ -12,12 +12,24 @@ interface Arrow {
   state: 'valid' | 'freed' | 'null';
 }
 
+function liftAmount(from: { x: number; y: number }, to: { x: number; y: number }) {
+  return Math.max(65, Math.abs(to.x - from.x) * 0.6 + Math.abs(to.y - from.y) * 0.4);
+}
+
 function bezier(
   from: { x: number; y: number },
   to:   { x: number; y: number },
+  arcAbove?: boolean,
 ): string {
   const dx = to.x - from.x;
   const dy = to.y - from.y;
+
+  if (arcAbove) {
+    // Arc up and over — for heap back-references and self-pointers
+    const lift  = liftAmount(from, to);
+    const ctrlY = Math.min(from.y, to.y) - lift;
+    return `M ${from.x} ${from.y} C ${from.x} ${ctrlY}, ${to.x} ${ctrlY}, ${to.x} ${to.y}`;
+  }
 
   // Stack→heap arrows travel mostly vertically. Use vertical control points so
   // the curve goes straight down then curves into the target — never looping up.
@@ -26,8 +38,19 @@ function bezier(
     return `M ${from.x} ${from.y} C ${from.x} ${from.y + cy}, ${to.x} ${to.y - cy}, ${to.x} ${to.y}`;
   }
 
-  // Heap→heap arrows (linked list, same row): use horizontal control points.
+  // Heap→heap forward arrows (linked list, same row): use horizontal control points.
   return `M ${from.x} ${from.y} C ${from.x + dx * 0.55} ${from.y}, ${from.x + dx * 0.45} ${to.y}, ${to.x} ${to.y}`;
+}
+
+// Compute the visual midpoint of the arc-above bezier for label placement.
+// At t=0.5: B = 0.125*P0 + 0.375*P1 + 0.375*P2 + 0.125*P3
+function arcMid(from: { x: number; y: number }, to: { x: number; y: number }) {
+  const lift  = liftAmount(from, to);
+  const ctrlY = Math.min(from.y, to.y) - lift;
+  return {
+    x: (from.x + to.x) / 2,
+    y: 0.125 * (from.y + to.y) + 0.75 * ctrlY + 14, // +14: label just below arc peak
+  };
 }
 
 function midpoint(
@@ -70,7 +93,13 @@ export default function ArrowLayer({ tick }: { tick: number }) {
       rect.bottom >= canvasRect.top && rect.top <= canvasRect.bottom &&
       rect.right  >= canvasRect.left && rect.left <= canvasRect.right;
 
-    const addArrow = (id: string, label: string, srcKey: string, targetAddr: string | null) => {
+    const addArrow = (
+      id: string,
+      label: string,
+      srcKey: string,
+      targetAddr: string | null,
+      isHeapArrow = false,
+    ) => {
       const srcEl = getEl(srcKey);
       if (!srcEl) return;
 
@@ -94,16 +123,34 @@ export default function ArrowLayer({ tick }: { tick: number }) {
       const tgtRect = tgtEl.getBoundingClientRect();
       if (!inCanvasBounds(tgtRect)) return;
 
-      // If source is significantly above target, land on the top of the block
-      // so the vertical bezier arrives naturally. Otherwise use left edge (horizontal).
-      const landOnTop = (tgtRect.top - srcRect.bottom) > 40;
-      const to      = rectEdge(tgtRect, landOnTop ? 'top' : 'left', canvasRect);
       const isFreed = heap[targetAddr]?.state === 'freed';
-      const mid     = midpoint(from, to);
+
+      // Self-pointer: source field lives inside the target block
+      const isSelf = isHeapArrow && srcKey.startsWith(`heap:${targetAddr}:`);
+      // Back-reference: target block is to the left of the source (circular / reverse link)
+      const isBackRef = isHeapArrow && !isSelf && tgtRect.right < srcRect.left;
+      const arcAbove  = isSelf || isBackRef;
+
+      let to: { x: number; y: number };
+      let mid: { x: number; y: number };
+
+      if (arcAbove) {
+        // Curve up and over — land on top of target so the arrow arrives cleanly from above
+        to  = rectEdge(tgtRect, 'top', canvasRect);
+        mid = arcMid(from, to);
+      } else {
+        // If source is significantly above target, land on the top of the block
+        // so the vertical bezier arrives naturally. Otherwise use left edge (horizontal).
+        const landOnTop = (tgtRect.top - srcRect.bottom) > 40;
+        to  = rectEdge(tgtRect, landOnTop ? 'top' : 'left', canvasRect);
+        const rawMid = midpoint(from, to);
+        mid = { x: rawMid.x, y: rawMid.y - 8 };
+      }
+
       computed.push({
         id, label,
-        path: bezier(from, to),
-        midX: mid.x, midY: mid.y - 8,
+        path: bezier(from, to, arcAbove),
+        midX: mid.x, midY: mid.y,
         state: isFreed ? 'freed' : 'valid',
       });
     };
@@ -124,6 +171,7 @@ export default function ArrowLayer({ tick }: { tick: number }) {
             varName,
             `stack:${sf.function}:${varName}`,
             val.address,
+            false,
           );
         }
       });
@@ -139,6 +187,7 @@ export default function ArrowLayer({ tick }: { tick: number }) {
             `→${field}`,
             `heap:${addr}:${field}`,
             val.address,
+            true,
           );
         }
       });
@@ -153,7 +202,7 @@ export default function ArrowLayer({ tick }: { tick: number }) {
   return (
     <svg
       className="absolute inset-0 pointer-events-none z-30"
-      style={{ width: '100%', height: '100%', overflow: 'hidden' }}
+      style={{ width: '100%', height: '100%', overflow: 'visible' }}
     >
       <defs>
         {(['valid', 'freed', 'null'] as const).map(s => (
