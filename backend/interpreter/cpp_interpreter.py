@@ -3340,10 +3340,14 @@ class CppInterpreter:
             return _INT(0)
 
         if method_name == 'back':
-            v = vals[-1] if vals else 0
+            if not vals:
+                self._crash(line, 'out_of_range', f'{real_name}.back() called on empty container')
+            v = vals[-1]
             return v if isinstance(v, dict) else _INT(int(v))
         if method_name == 'front':
-            v = vals[0] if vals else 0
+            if not vals:
+                self._crash(line, 'out_of_range', f'{real_name}.front() called on empty container')
+            v = vals[0]
             return v if isinstance(v, dict) else _INT(int(v))
 
         if method_name == 'clear':
@@ -3352,10 +3356,11 @@ class CppInterpreter:
             return _INT(0)
 
         if method_name == 'pop_back':
-            if vals:
-                vals.pop()
-                arr['values'] = vals
-                save()
+            if not vals:
+                self._crash(line, 'out_of_range', f'{real_name}.pop_back() called on empty vector')
+            vals.pop()
+            arr['values'] = vals
+            save()
             return _INT(0)
 
         if method_name == 'begin':
@@ -3674,24 +3679,34 @@ class CppInterpreter:
             return _INT(0)
 
         if method_name == 'front':
-            return vals[0] if vals else _INT(0)
+            if not vals:
+                self._crash(line, 'out_of_range', f'{real_name}.front() called on empty container')
+            return vals[0]
 
         if method_name == 'top':
+            if not vals:
+                self._crash(line, 'out_of_range', f'{real_name}.top() called on empty container')
             ctype = col.get('ctype', '')
             if 'stack' in ctype:
-                return vals[-1] if vals else _INT(0)  # stack top = last pushed
-            return vals[0] if vals else _INT(0)  # priority_queue top = first (sorted)
+                return vals[-1]  # stack top = last pushed
+            return vals[0]  # priority_queue top = first (sorted)
 
         if method_name == 'back':
-            return vals[-1] if vals else _INT(0)
+            if not vals:
+                self._crash(line, 'out_of_range', f'{real_name}.back() called on empty container')
+            return vals[-1]
 
         if method_name == 'pop':
             ctype = col.get('ctype', '')
             popped = None
             if 'stack' in ctype:
-                if vals: popped = vals.pop()
+                if not vals:
+                    self._crash(line, 'out_of_range', f'{real_name}.pop() called on empty stack')
+                popped = vals.pop()
             else:  # queue/priority_queue/deque: pop from front
-                if vals: popped = vals.pop(0)
+                if not vals:
+                    self._crash(line, 'out_of_range', f'{real_name}.pop() called on empty container')
+                popped = vals.pop(0)
             col['values'] = vals
             save()
             self.memory.update_line(line)
