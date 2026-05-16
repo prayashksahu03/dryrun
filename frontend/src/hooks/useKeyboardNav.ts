@@ -6,7 +6,9 @@ export function useKeyboardNav() {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement) return;
+      const t = e.target as HTMLElement;
+      if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return;
+      if (t.isContentEditable) return;
       switch (e.key) {
         case 'ArrowRight': case 'l': e.preventDefault(); stepForward(); break;
         case 'ArrowLeft':  case 'h': e.preventDefault(); stepBackward(); break;
