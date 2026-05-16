@@ -89,14 +89,12 @@ int main() {
 // ── Editor mode ───────────────────────────────────────────────────────
 
 function EditorMode() {
-  const { editorSource, setEditorSource, stdinInput, setStdinInput, runCode, isLoading, error, loadDemo, demoIndex, language } =
+  const { editorSource, setEditorSource, stdinInput, setStdinInput, runCode, isLoading, error, loadDemo, language } =
     useExecutionStore();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [stdinOpen, setStdinOpen] = useState(true);
   const errorLine   = error ? parseErrorLine(error) : null;
   const errorType   = error ? parseErrorType(error) : null;
-  const DEMO_LABELS = ['dangling ptr', 'recursion'];
-  const nextDemoLabel = DEMO_LABELS[(demoIndex + 1) % DEMO_LABELS.length];
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
@@ -134,9 +132,9 @@ function EditorMode() {
           <button
             onClick={loadDemo}
             className="text-[10px] font-mono text-zinc-600 hover:text-zinc-400 transition-colors px-1.5 py-0.5 rounded hover:bg-zinc-800"
-            title={`Load next demo: ${nextDemoLabel}`}
+            title="Load dangling pointer demo"
           >
-            demo: {nextDemoLabel}
+            demo
           </button>
           <button
             data-tour="run-button"

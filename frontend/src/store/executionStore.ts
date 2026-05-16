@@ -3,12 +3,11 @@ import { Trace, TraceStep } from '../types/trace';
 import { Ambiguity, VizHint } from '../types/ambiguity';
 import { detectAmbiguities } from '../utils/detectAmbiguities';
 import { danglingPointerTrace } from '../data/danglingPointer';
-import { factorialTrace } from '../data/factorial';
 import { GuidedProgram } from '../data/guided';
 
 const BACKEND = import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000';
 
-const DEMOS: Trace[] = [danglingPointerTrace, factorialTrace];
+const DEMOS: Trace[] = [danglingPointerTrace];
 
 export type Language = 'c' | 'cpp' | 'python';
 
