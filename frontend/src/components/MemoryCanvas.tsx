@@ -1,4 +1,4 @@
-import { useRef, useCallback, useState, useEffect, useMemo } from 'react';
+import { useRef, useCallback, useState, useEffect, useLayoutEffect, useMemo } from 'react';
 import { useExecutionStore, PanelKey } from '../store/executionStore';
 import { RefRegistryContext } from '../contexts/refRegistry';
 import StackZone from './stack/StackZone';
@@ -29,6 +29,20 @@ export default function MemoryCanvas() {
   const [stackPct, setStackPct] = useState(DEFAULT_PCT);
   const [dragging, setDragging] = useState(false);
   const isDragging              = useRef(false);
+  const lastCanvasWidth         = useRef(0);
+
+  // Bump tick synchronously whenever the canvas width changes (external panel resize).
+  // useLayoutEffect runs after every render — if the CSS width changed (because
+  // App.tsx updated codePct / inspectorPct), we detect it here and bump tick so
+  // ArrowLayer recomputes paths against the new node positions immediately.
+  useLayoutEffect(() => {
+    if (!canvasRef.current) return;
+    const w = canvasRef.current.offsetWidth;
+    if (w !== lastCanvasWidth.current) {
+      lastCanvasWidth.current = w;
+      setTick(t => t + 1);
+    }
+  });
 
   const register = useCallback((key: string, el: HTMLElement | null) => {
     if (el) registryMap.current.set(key, el);
@@ -55,6 +69,7 @@ export default function MemoryCanvas() {
     const rect = canvasRef.current.getBoundingClientRect();
     const pct  = ((e.clientY - rect.top) / rect.height) * 100;
     setStackPct(Math.min(Math.max(pct, MIN_PCT), MAX_PCT));
+    setTick(t => t + 1);
   };
 
   const onDividerPointerUp = () => {
