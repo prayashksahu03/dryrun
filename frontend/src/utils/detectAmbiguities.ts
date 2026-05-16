@@ -103,6 +103,12 @@ export function detectAmbiguities(trace: Trace): Ambiguity[] {
       if (typeof values[0] !== 'number') continue;   // must be plain ints
 
       const nameLower = name.toLowerCase();
+
+      // Skip names that belong to known specialized visualizers
+      const DSU_NAMES = new Set(['parent', 'par', 'dsu', 'fa', 'root', 'id', 'f']);
+      const BIT_NAMES = new Set(['bit', 'fenwick', 'fen', 'bit_tree', 'bitree']);
+      if (DSU_NAMES.has(nameLower) || BIT_NAMES.has(nameLower)) continue;
+
       const SEGTREE_SUBSTRINGS = ['segtree', 'seg_tree', 'segment_tree'];
       const SEGTREE_EXACT      = ['seg', 'st', 'tree'];
       const hasSegtreeName =
@@ -111,7 +117,9 @@ export function detectAmbiguities(trace: Trace): Ambiguity[] {
 
       const size       = values.length;
       const inferredN  = size / 4;
-      const looksLike4n = Number.isInteger(inferredN) && inferredN >= 2 && inferredN <= 500;
+      // Require n >= 4 (size >= 16) for heuristic match to avoid false positives
+      // on small rank/helper arrays (e.g. rnk[8], cnt[8])
+      const looksLike4n = Number.isInteger(inferredN) && inferredN >= 4 && inferredN <= 500;
 
       if (hasSegtreeName || (looksLike4n && nameLower.length <= 4)) {
         result.push({
