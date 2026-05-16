@@ -435,10 +435,11 @@ class CppInterpreter:
             # Combine their texts into one step
             combined_text = ''.join(s['event']['text'] for s in run)
             last = run[-1]
+            disp = combined_text.replace('\n', ' ').replace('\t', ' ').strip()
             merged.append({
                 'index':       len(merged),
                 'line':        run[0]['line'],
-                'description': f"Output: {combined_text!r}",
+                'description': f"Output: {disp}" if disp else "Output: (newline)",
                 'event':       {'type': 'output', 'text': combined_text},
                 'memory':      last['memory'],
             })
@@ -1101,7 +1102,8 @@ class CppInterpreter:
                 line  = cursor.location.line
                 text  = self._val_to_output_text(r_val)
                 if text or text == '0':
-                    self._emit(line, f"Output: {text!r}",
+                    _disp = text.replace('\n', ' ').replace('\t', ' ').strip()
+                    self._emit(line, f"Output: {_disp or '(newline)'}",
                                {'type': 'output', 'text': text})
                 return _INT(0)
 
@@ -1609,7 +1611,8 @@ class CppInterpreter:
                     val  = self._eval(real)
                     text = self._val_to_output_text(val)
                     if text is not None and (text or text == '0'):
-                        self._emit(line, f"Output: {text!r}",
+                        _disp = text.replace('\n', ' ').replace('\t', ' ').strip()
+                        self._emit(line, f"Output: {_disp or '(newline)'}",
                                    {'type': 'output', 'text': text})
                     break
                 return _INT(0)
@@ -1668,7 +1671,8 @@ class CppInterpreter:
                         val = self._eval(arg_c)
                         text = (val.get('value', '') if isinstance(val, dict) else str(val))
                         text = str(text).replace('\\n', '\n').replace('\\t', '\t')
-                        self._emit(line, f"Output: {text!r}",
+                        _disp = text.replace('\n', ' ').replace('\t', ' ').strip()
+                        self._emit(line, f"Output: {_disp or '(newline)'}",
                                    {'type': 'output', 'text': text})
                 elif is_cin and method_name == 'operator>>':
                     arg_c = ch[1] if len(ch) > 1 else None
