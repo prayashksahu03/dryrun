@@ -238,6 +238,11 @@ const long long LONG_MAX  = 9223372036854775807LL;
 const int       LONG_MIN  = -2147483648;
 int printf(const char* fmt, ...);
 int scanf(const char* fmt, ...);
+void* malloc(unsigned long size);
+void* calloc(unsigned long count, unsigned long size);
+void* realloc(void* ptr, unsigned long size);
+void  free(void* ptr);
+void  assert(int cond);
 """
 _STUBS_LINES = _STUBS.count('\n')   # stubs end with \n; body starts on the next line
 
