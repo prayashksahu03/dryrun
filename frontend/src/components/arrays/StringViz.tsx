@@ -10,11 +10,15 @@ export default function StringViz({
   value,
   lastWrite,
   pointers,
+  windowLeft,
+  windowRight,
 }: {
   name: string;
   value: string;
   lastWrite?: number;
   pointers?: ArrayPointer[];
+  windowLeft?: number;
+  windowRight?: number;
 }) {
   const chars = [...value];
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -45,13 +49,43 @@ export default function StringViz({
         <span className="text-zinc-700 ml-1">str[{chars.length}]</span>
       </div>
 
+      {/* Sliding-window bracket */}
+      {windowLeft !== undefined && windowRight !== undefined && windowLeft <= windowRight && (
+        <div className="relative mb-1" style={{
+          width: `${(windowRight - windowLeft + 1) * CHAR_W}px`,
+          marginLeft: `${windowLeft * CHAR_W}px`,
+        }}>
+          <div className="rounded-sm" style={{
+            height: 3,
+            background: 'rgba(99,102,241,0.35)',
+            boxShadow: '0 0 6px rgba(99,102,241,0.4)',
+          }} />
+        </div>
+      )}
+
       <div className="overflow-x-auto no-scrollbar">
         <div ref={scrollRef} className="flex items-end gap-0" style={{ width: 'max-content' }}>
           {chars.map((ch, i) => {
             const isHi      = i === lastWrite;
+            const inWin     = windowLeft !== undefined && windowRight !== undefined && i >= windowLeft && i <= windowRight;
             const ptrs      = ptrMap.get(i);
             const isPointed = !!ptrs?.length;
             const primaryColor = isPointed ? pointerColor(ptrs![0].name) : undefined;
+
+            const bgColor = isPointed
+              ? `${primaryColor}18`
+              : isHi
+                ? 'rgba(251,191,36,0.18)'
+                : inWin
+                  ? 'rgba(99,102,241,0.08)'
+                  : 'rgba(24,24,27,0.9)';
+            const bdColor = isPointed
+              ? `${primaryColor}80`
+              : isHi
+                ? 'rgba(251,191,36,0.6)'
+                : inWin
+                  ? 'rgba(99,102,241,0.4)'
+                  : 'rgba(63,63,70,0.5)';
 
             return (
               <div key={i} className="flex flex-col items-center" style={{ minWidth: CHAR_W }}>
@@ -81,18 +115,7 @@ export default function StringViz({
                 <span className="text-[8px] font-mono text-zinc-700 mb-0.5">{i}</span>
                 {/* Character cell */}
                 <motion.div
-                  animate={{
-                    background: isPointed
-                      ? `${primaryColor}18`
-                      : isHi
-                        ? 'rgba(251,191,36,0.18)'
-                        : 'rgba(24,24,27,0.9)',
-                    borderColor: isPointed
-                      ? `${primaryColor}80`
-                      : isHi
-                        ? 'rgba(251,191,36,0.6)'
-                        : 'rgba(63,63,70,0.5)',
-                  }}
+                  animate={{ background: bgColor, borderColor: bdColor }}
                   transition={{ duration: 0.2 }}
                   className="flex items-center justify-center text-[10px] font-mono font-semibold border"
                   style={{

@@ -4,8 +4,11 @@ import { useExecutionStore } from '../../store/executionStore';
 import StackVariable from './StackVariable';
 import ArrayViz, { ArrayPointer } from '../arrays/ArrayViz';
 import StringViz from '../arrays/StringViz';
+import HeapTreeViz from '../arrays/HeapTreeViz';
 import { StackViz, QueueViz } from '../arrays/StackQueueViz';
 import { SetViz, MapViz } from '../arrays/SetViz';
+import DSUViz from '../arrays/DSUViz';
+import BITViz from '../arrays/BITViz';
 
 // Variable names that represent array indices/pointers
 const INDEX_NAMES = new Set([
@@ -14,6 +17,16 @@ const INDEX_NAMES = new Set([
   'start', 'end', 'ptr', 'idx', 'pos',
   'slow', 'fast', 'head', 'tail', 'curr',
 ]);
+
+// DSU parent array names → render as forest
+const DSU_NAMES = new Set(['parent', 'par', 'dsu', 'fa', 'root', 'id', 'f']);
+// BIT/Fenwick array names → render with arc overlay (not 'tree' — too generic, clashes with segtree)
+const BIT_NAMES = new Set(['bit', 'BIT', 'fenwick', 'fen', 'bit_tree', 'bitree']);
+
+// Left-boundary pointer names (sliding window left edge)
+const LEFT_NAMES  = new Set(['left', 'lo', 'l', 'start', 'slow']);
+// Right-boundary pointer names (sliding window right edge)
+const RIGHT_NAMES = new Set(['right', 'hi', 'r', 'end', 'fast']);
 
 function computePointers(frame: StackFrameData, arrName: string, arrLen: number): ArrayPointer[] {
   const result: ArrayPointer[] = [];
@@ -26,6 +39,23 @@ function computePointers(frame: StackFrameData, arrName: string, arrLen: number)
     }
   }
   return result;
+}
+
+function computeWindow(
+  frame: StackFrameData, arrLen: number
+): { left: number; right: number } | null {
+  let leftIdx: number | null  = null;
+  let rightIdx: number | null = null;
+  for (const [name, val] of Object.entries(frame.variables)) {
+    if (val.kind !== 'int') continue;
+    const v = val.value;
+    if (LEFT_NAMES.has(name) && v >= 0 && v < arrLen) leftIdx  = v;
+    if (RIGHT_NAMES.has(name) && v >= 0 && v < arrLen) rightIdx = v;
+  }
+  if (leftIdx !== null && rightIdx !== null && leftIdx <= rightIdx) {
+    return { left: leftIdx, right: rightIdx };
+  }
+  return null;
 }
 
 // Serialize a VariableValue for diff comparison — exclude lastWrite since it
@@ -132,9 +162,25 @@ export default function StackFrameComponent({
           if (val.kind === 'array') {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const ctype: string = (val as any).ctype ?? '';
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const isMinHeap: boolean = (val as any).min_heap ?? false;
+            const isPQ    = ctype.includes('priority_queue');
             const isStack = ctype.includes('stack') && !ctype.includes('priority');
             const isQueue = ctype.includes('queue') || ctype.includes('deque');
 
+            if (isPQ) {
+              return (
+                <div key={name} className="px-1.5 pb-1">
+                  <HeapTreeViz
+                    name={name}
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    values={val.values as any[]}
+                    lastWrite={val.lastWrite}
+                    isMinHeap={isMinHeap}
+                  />
+                </div>
+              );
+            }
             if (isStack) {
               return (
                 <div key={name} className="px-1.5 pb-1">
@@ -160,6 +206,47 @@ export default function StackFrameComponent({
               );
             }
 
+            // DSU parent-array detection (1D, all values in [0, n))
+            if (!val.rows && !val.cols && DSU_NAMES.has(name)) {
+              const vals = val.values as number[];
+              const isDSU = vals.length > 0 && vals.every(
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                v => { const x = typeof v === 'number' ? v : (v as any)?.value ?? 0; return x >= 0 && x < vals.length; }
+              );
+              if (isDSU) {
+                return (
+                  <div key={name} className="px-1.5 pb-1">
+                    <DSUViz
+                      name={name}
+                      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                      values={val.values as any[]}
+                      lastWrite={val.lastWrite}
+                    />
+                  </div>
+                );
+              }
+            }
+
+            // BIT/Fenwick array detection
+            if (!val.rows && !val.cols && BIT_NAMES.has(name)) {
+              return (
+                <div key={name} className="px-1.5 pb-1">
+                  <BITViz
+                    name={name}
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    values={val.values as any[]}
+                    lastWrite={val.lastWrite}
+                  />
+                </div>
+              );
+            }
+
+            const arrLen = !val.rows && !val.cols ? (val.values as number[]).length : 0;
+            const pointers = !val.rows && !val.cols
+              ? computePointers(frame, name, arrLen) : undefined;
+            const win = !val.rows && !val.cols
+              ? computeWindow(frame, arrLen) : null;
+
             return (
               <div key={name} className="px-1.5 pb-1">
                 <ArrayViz
@@ -168,11 +255,9 @@ export default function StackFrameComponent({
                   rows={val.rows}
                   cols={val.cols}
                   lastWrite={val.lastWrite}
-                  pointers={
-                    !val.rows && !val.cols
-                      ? computePointers(frame, name, (val.values as number[]).length)
-                      : undefined
-                  }
+                  pointers={pointers}
+                  windowLeft={win?.left}
+                  windowRight={win?.right}
                 />
               </div>
             );
@@ -181,6 +266,7 @@ export default function StackFrameComponent({
           if (val.kind === 'char' && val.value.length > 1) {
             const strLen = val.value.length;
             const pointers = computePointers(frame, name, strLen);
+            const strWin   = computeWindow(frame, strLen);
             // Detect last-modified character index by diffing prev value
             let lastWrite: number | undefined;
             const prevVal = prevVars[name];
@@ -196,6 +282,8 @@ export default function StackFrameComponent({
                   value={val.value}
                   lastWrite={lastWrite}
                   pointers={pointers}
+                  windowLeft={strWin?.left}
+                  windowRight={strWin?.right}
                 />
               </div>
             );

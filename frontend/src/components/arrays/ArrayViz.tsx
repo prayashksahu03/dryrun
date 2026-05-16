@@ -47,13 +47,20 @@ function Array1D({
   values,
   lastWrite,
   pointers,
+  windowLeft,
+  windowRight,
 }: {
   name: string;
   values: number[];
   lastWrite?: number[];
   pointers?: ArrayPointer[];
+  windowLeft?: number;
+  windowRight?: number;
 }) {
-  const hi = lastWrite?.length === 1 ? lastWrite[0] : -1;
+  // lastWrite.length === 1 → single highlight; length === 2 → swap dual-highlight
+  const hi   = lastWrite?.length === 1 ? lastWrite[0] : -1;
+  const swap0 = lastWrite?.length === 2 ? lastWrite[0] : -1;
+  const swap1 = lastWrite?.length === 2 ? lastWrite[1] : -1;
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Group pointers by index for quick lookup
@@ -83,12 +90,51 @@ function Array1D({
         <span className="text-zinc-700 ml-1">[{values.length}]</span>
       </div>
 
+      {/* Sliding-window bracket */}
+      {windowLeft !== undefined && windowRight !== undefined && windowLeft <= windowRight && (
+        <div className="relative mb-1" style={{ width: `${(windowRight - windowLeft + 1) * CELL_W}px`, marginLeft: `${windowLeft * CELL_W}px` }}>
+          <div className="rounded-sm" style={{
+            height: 3,
+            background: 'rgba(99,102,241,0.35)',
+            boxShadow: '0 0 6px rgba(99,102,241,0.4)',
+          }} />
+        </div>
+      )}
+
       <div className="overflow-x-auto no-scrollbar">
         <div ref={scrollRef} className="flex items-end gap-0" style={{ width: 'max-content' }}>
           {values.map((v, i) => {
-            const isHi = i === hi;
-            const ptrs = ptrMap.get(i);
+            const isHi    = i === hi;
+            const isSwap  = i === swap0 || i === swap1;
+            const inWin   = windowLeft !== undefined && windowRight !== undefined && i >= windowLeft && i <= windowRight;
+            const ptrs    = ptrMap.get(i);
             const isPointed = !!ptrs?.length;
+
+            const bgColor = isSwap
+              ? 'rgba(167,139,250,0.22)'
+              : isPointed
+                ? `${pointerColor(ptrs![0].name)}18`
+                : isHi
+                  ? 'rgba(251,191,36,0.18)'
+                  : inWin
+                    ? 'rgba(99,102,241,0.08)'
+                    : 'rgba(24,24,27,0.9)';
+            const bdColor = isSwap
+              ? 'rgba(167,139,250,0.7)'
+              : isPointed
+                ? `${pointerColor(ptrs![0].name)}80`
+                : isHi
+                  ? 'rgba(251,191,36,0.6)'
+                  : inWin
+                    ? 'rgba(99,102,241,0.4)'
+                    : 'rgba(63,63,70,0.5)';
+            const txtColor = isSwap
+              ? '#c4b5fd'
+              : isPointed
+                ? pointerColor(ptrs![0].name)
+                : isHi
+                  ? '#fbbf24'
+                  : '#a1a1aa';
 
             return (
               <div key={i} className="flex flex-col items-center" style={{ minWidth: CELL_W }}>
@@ -115,21 +161,10 @@ function Array1D({
                 <span className="text-[8px] font-mono text-zinc-700 mb-0.5">{i}</span>
                 {/* Cell */}
                 <motion.div
-                  animate={{
-                    background: isPointed
-                      ? `${pointerColor(ptrs![0].name)}18`
-                      : isHi ? 'rgba(251,191,36,0.18)' : 'rgba(24,24,27,0.9)',
-                    borderColor: isPointed
-                      ? `${pointerColor(ptrs![0].name)}80`
-                      : isHi ? 'rgba(251,191,36,0.6)' : 'rgba(63,63,70,0.5)',
-                  }}
+                  animate={{ background: bgColor, borderColor: bdColor }}
                   transition={{ duration: 0.2 }}
                   className="flex items-center justify-center text-[10px] font-mono font-semibold border"
-                  style={{
-                    width: CELL_W - 1,
-                    height: CELL_H,
-                    color: isPointed ? pointerColor(ptrs![0].name) : isHi ? '#fbbf24' : '#a1a1aa',
-                  }}
+                  style={{ width: CELL_W - 1, height: CELL_H, color: txtColor }}
                 >
                   {fmtCell(v as AnyVal)}
                 </motion.div>
@@ -310,6 +345,8 @@ export default function ArrayViz({
   cols,
   lastWrite,
   pointers,
+  windowLeft,
+  windowRight,
 }: {
   name: string;
   values: number[] | number[][] | unknown[];
@@ -317,12 +354,13 @@ export default function ArrayViz({
   cols?: number;
   lastWrite?: number[];
   pointers?: ArrayPointer[];
+  windowLeft?: number;
+  windowRight?: number;
 }) {
   // Non-primitive elements — route by element kind
   if (!rows && !cols && values.length > 0 && typeof values[0] === 'object' && values[0] !== null && !Array.isArray(values[0])) {
     const first = values[0] as { kind?: string; fields?: Record<string, AnyVal> };
     // Scalar VariableValue elements (int / char / pointer from stack<T>, queue<T> etc.)
-    // — pass through to Array1D which uses fmtCell and handles them correctly
     if (first.kind === 'int' || first.kind === 'char' || first.kind === 'pointer') {
       return (
         <Array1D
@@ -330,6 +368,8 @@ export default function ArrayViz({
           values={values as number[]}
           lastWrite={lastWrite}
           pointers={pointers}
+          windowLeft={windowLeft}
+          windowRight={windowRight}
         />
       );
     }
@@ -362,6 +402,8 @@ export default function ArrayViz({
       values={values as number[]}
       lastWrite={lastWrite}
       pointers={pointers}
+      windowLeft={windowLeft}
+      windowRight={windowRight}
     />
   );
 }

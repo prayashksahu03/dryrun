@@ -223,8 +223,32 @@ namespace std {
   };
   int stoi(string const&);
   string to_string(int); string to_string(long long);
-  int isdigit(int); int isalpha(int); int isspace(int);
+  int isdigit(int); int isalpha(int); int isspace(int); int ispunct(int);
+  int isupper(int); int islower(int); int isalnum(int);
   int toupper(int); int tolower(int);
+  template<typename T> T gcd(T a, T b);
+  template<typename T> T lcm(T a, T b);
+  template<typename It, typename T> void fill(It first, It last, T const& val);
+  template<typename It, typename T> void iota(It first, It last, T val);
+  template<typename It, typename T> int count(It first, It last, T const& val);
+  template<typename It> bool next_permutation(It first, It last);
+  template<typename It> bool prev_permutation(It first, It last);
+  template<typename It> void make_heap(It first, It last);
+  template<typename It> void push_heap(It first, It last);
+  template<typename It> void pop_heap(It first, It last);
+  template<typename It, typename T> bool binary_search(It first, It last, T const& val);
+  template<typename It> It rotate(It first, It middle, It last);
+  template<typename It> It unique(It first, It last);
+  template<typename It1, typename It2> long long distance(It1 first, It2 last);
+  template<typename It> void advance(It& it, long long n);
+  template<typename It, typename F> It find_if(It first, It last, F pred);
+  template<typename It, typename F> It find_if_not(It first, It last, F pred);
+  template<typename It, typename F> long long count_if(It first, It last, F pred);
+  template<typename It, typename F> bool any_of(It first, It last, F pred);
+  template<typename It, typename F> bool all_of(It first, It last, F pred);
+  template<typename It, typename F> bool none_of(It first, It last, F pred);
+  template<typename It, typename Out, typename F> Out transform(It first, It last, Out out, F op);
+  template<typename It, typename Out> Out copy(It first, It last, Out out);
   typedef long long ll;
 }
 using namespace std;
@@ -251,6 +275,10 @@ int   strcmp(const char* a, const char* b);
 void* memset(void* ptr, int val, unsigned long n);
 void* memcpy(void* dst, const void* src, unsigned long n);
 int   atoi(const char* s);
+int __builtin_popcount(unsigned int x);
+int __builtin_clz(unsigned int x);
+int __builtin_ctz(unsigned int x);
+int __gcd(int a, int b);
 """
 _STUBS_LINES = _STUBS.count('\n')   # stubs end with \n; body starts on the next line
 
@@ -538,6 +566,8 @@ class CppInterpreter:
             ch = self._ch(cursor)
             val = self._eval(ch[0]) if ch else None
             raise ReturnException(val)
+        elif k == CK.SWITCH_STMT:
+            self._exec_switch(cursor)
         elif k == CK.BREAK_STMT:
             raise BreakException()
         elif k == CK.CONTINUE_STMT:
@@ -800,7 +830,16 @@ class CppInterpreter:
         def is_null(c): return c is None or c.kind == CK.NULL_STMT
 
         if   len(ch) == 4: init_c, cond_c, incr_c, body_c = ch
-        elif len(ch) == 3: init_c, cond_c, body_c = ch; incr_c = None
+        elif len(ch) == 3:
+            # libclang omits the NULL_STMT for absent init/incr.
+            # If first child is a DECL_STMT the init is present and incr is absent:
+            #   for (int i = 0; cond;) body  → [DECL_STMT, cond, body]
+            # Otherwise init is absent and both cond and incr are present:
+            #   for (; cond; incr) body       → [cond, incr, body]
+            if ch[0].kind == CK.DECL_STMT:
+                init_c, cond_c, body_c = ch; incr_c = None
+            else:
+                cond_c, incr_c, body_c = ch; init_c = None
         elif len(ch) == 2: cond_c, body_c = ch;  init_c = incr_c = None
         elif len(ch) == 1: body_c = ch[0]; init_c = cond_c = incr_c = None
         else: return
@@ -874,6 +913,57 @@ class CppInterpreter:
                 )
             if not self._truthy(self._eval(cond_c)):
                 break
+
+    def _exec_switch(self, cursor):
+        children = self._ch(cursor)
+        if not children:
+            return
+        cond_c   = children[0]
+        body_c   = children[1] if len(children) > 1 else None
+        cond_val = self._to_int(self._eval(cond_c))
+        line     = cursor.location.line
+        self._emit(line, f"switch({cond_val}).",
+                   {'type': 'assign', 'target': 'switch', 'value': str(cond_val)})
+        if body_c is None:
+            return
+        # Flatten the body into direct children (the compound stmt contains case/default stmts)
+        body_stmts = self._ch(body_c) if body_c.kind == CK.COMPOUND_STMT else [body_c]
+        # Find matching case index
+        matching_idx = None
+        default_idx  = None
+        for i, stmt in enumerate(body_stmts):
+            if stmt.kind == CK.DEFAULT_STMT:
+                default_idx = i
+            elif stmt.kind == CK.CASE_STMT:
+                case_ch = self._ch(stmt)
+                if case_ch:
+                    try:
+                        case_val = self._to_int(self._eval(case_ch[0]))
+                        if case_val == cond_val and matching_idx is None:
+                            matching_idx = i
+                    except Exception:
+                        pass
+        if matching_idx is None:
+            matching_idx = default_idx
+        if matching_idx is None:
+            return
+        # Execute from matching_idx, falling through until BreakException
+        try:
+            for i in range(matching_idx, len(body_stmts)):
+                stmt = body_stmts[i]
+                if stmt.kind == CK.CASE_STMT:
+                    case_ch = self._ch(stmt)
+                    # child[0] = case value, child[1] = first body stmt (if any)
+                    if len(case_ch) > 1:
+                        self._exec_stmt(case_ch[1])
+                elif stmt.kind == CK.DEFAULT_STMT:
+                    default_ch = self._ch(stmt)
+                    if default_ch:
+                        self._exec_stmt(default_ch[0])
+                else:
+                    self._exec_stmt(stmt)
+        except BreakException:
+            pass
 
     # ── Expression evaluation ───────────────────────────────────────────────
 
@@ -2464,6 +2554,52 @@ class CppInterpreter:
                 return _INT(max(self._to_int(v) for v in vals)) if vals else _INT(0)
             return _INT(0)
         if fn_name == 'swap' and len(args) >= 2:
+            val_a = copy.deepcopy(args[0])
+            val_b = copy.deepcopy(args[1])
+            if arg_cursors and len(arg_cursors) >= 2:
+                uw0 = self._unwrap(arg_cursors[0]) or arg_cursors[0]
+                uw1 = self._unwrap(arg_cursors[1]) or arg_cursors[1]
+                # Detect if both sides are subscript accesses (C-array or vector operator[])
+                def _subscript_parts(uw):
+                    if uw.kind == CK.ARRAY_SUBSCRIPT_EXPR:
+                        ch = self._ch(uw)
+                        if len(ch) >= 2:
+                            return ch[0].spelling, ch[1]
+                    if uw.kind == CK.CALL_EXPR and uw.spelling == 'operator[]':
+                        ch = self._ch(uw)
+                        if len(ch) >= 2:
+                            # For vector/string operator[], ch[0] is the object
+                            try:
+                                n, _ = self._resolve_array(ch[0], 0)
+                                return n, ch[-1]
+                            except Exception:
+                                return ch[0].spelling, ch[-1]
+                    return None, None
+                n0, idx_c0 = _subscript_parts(uw0)
+                n1, idx_c1 = _subscript_parts(uw1)
+                if n0 and n0 == n1 and idx_c0 is not None and idx_c1 is not None:
+                    try:
+                        idx0 = self._to_int(self._eval(idx_c0))
+                        idx1 = self._to_int(self._eval(idx_c1))
+                        arr  = self.memory.get_var(n0)
+                        if isinstance(arr, dict) and arr.get('kind') == 'array':
+                            vals = arr.get('values', [])
+                            if 0 <= idx0 < len(vals) and 0 <= idx1 < len(vals):
+                                vals[idx0], vals[idx1] = vals[idx1], vals[idx0]
+                                arr['values']    = vals
+                                arr['lastWrite'] = [idx0, idx1]  # dual-highlight
+                                self.memory.set_var(n0, arr)
+                                self.memory.update_line(line)
+                                self._emit(line,
+                                           f"swap({n0}[{idx0}], {n0}[{idx1}]).",
+                                           {'type': 'assign', 'target': n0,
+                                            'value': f'swap [{idx0}]↔[{idx1}]'})
+                                return _INT(0)
+                    except Exception:
+                        pass
+                # Generic fallback: write each side separately
+                self._write_lval(arg_cursors[0], val_b, line)
+                self._write_lval(arg_cursors[1], val_a, line)
             return _INT(0)
         if fn_name in ('sort', 'std::sort', 'stable_sort') and arg_cursors:
             return self._sort_with_comparator(fn_name, arg_cursors, line)
@@ -2556,6 +2692,9 @@ class CppInterpreter:
         if fn_name in ('islower', 'std::islower') and args:
             c = self._to_int(args[0])
             return _INT(int(chr(c).islower()) if 0 <= c <= 127 else 0)
+        if fn_name in ('ispunct', 'std::ispunct') and args:
+            c = self._to_int(args[0])
+            return _INT(int(chr(c) in '!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~') if 0 <= c <= 127 else 0)
         if fn_name in ('toupper', 'std::toupper') and args:
             c = self._to_int(args[0])
             return _INT(ord(chr(c).upper()) if 0 <= c <= 127 else c)
@@ -2594,6 +2733,370 @@ class CppInterpreter:
                             f"stof: no valid number in string \"{sv.strip()}\"")
         if fn_name in ('to_wstring', 'std::to_wstring') and args:
             return {'kind': 'char', 'value': str(self._to_int(args[0]))}
+
+        # ── gcd / lcm ────────────────────────────────────────────────────
+        if fn_name in ('gcd', 'std::gcd', '__gcd', 'lcm', 'std::lcm') and len(args) >= 2:
+            import math as _math
+            a = self._to_int(args[0])
+            b = self._to_int(args[1])
+            if 'lcm' in fn_name:
+                result = 0 if a == 0 or b == 0 else abs(a * b) // _math.gcd(abs(a), abs(b))
+            else:
+                result = _math.gcd(abs(a), abs(b))
+            return _INT(result)
+
+        # ── __builtin_popcount / clz / ctz ───────────────────────────────
+        if fn_name == '__builtin_popcount' and args:
+            n = self._to_int(args[0]) & 0xFFFFFFFF
+            return _INT(bin(n).count('1'))
+        if fn_name == '__builtin_clz' and args:
+            n = self._to_int(args[0]) & 0xFFFFFFFF
+            if n == 0:
+                return _INT(32)
+            return _INT(31 - (n.bit_length() - 1))
+        if fn_name == '__builtin_ctz' and args:
+            n = self._to_int(args[0]) & 0xFFFFFFFF
+            if n == 0:
+                return _INT(32)
+            count = 0
+            while n & 1 == 0:
+                count += 1
+                n >>= 1
+            return _INT(count)
+
+        # ── fill / iota ─────────────────────────────────────────────────
+        if fn_name in ('fill', 'std::fill') and len(args) >= 3 and arg_cursors:
+            arr_name = self._find_arr_from_begin_cursor(arg_cursors[0])
+            fill_val = args[2] if len(args) > 2 else _INT(0)
+            if arr_name:
+                try:
+                    arr = self.memory.get_var(arr_name)
+                    if isinstance(arr, dict) and arr.get('kind') == 'array':
+                        n = len(arr.get('values', []))
+                        arr['values'] = [self._to_int(fill_val)] * n
+                        arr['lastWrite'] = [n - 1] if n else []
+                        self.memory.set_var(arr_name, arr)
+                        self.memory.update_line(line)
+                        self._emit(line, f"fill({arr_name}, {self._fmt(fill_val)}).",
+                                   {'type': 'assign', 'target': arr_name,
+                                    'value': self._fmt(fill_val)})
+                except RuntimeError:
+                    pass
+            return _INT(0)
+        if fn_name in ('iota', 'std::iota') and len(args) >= 3 and arg_cursors:
+            arr_name = self._find_arr_from_begin_cursor(arg_cursors[0])
+            start_val = self._to_int(args[2]) if len(args) > 2 else 0
+            if arr_name:
+                try:
+                    arr = self.memory.get_var(arr_name)
+                    if isinstance(arr, dict) and arr.get('kind') == 'array':
+                        n = len(arr.get('values', []))
+                        arr['values'] = list(range(start_val, start_val + n))
+                        arr['lastWrite'] = [n - 1] if n else []
+                        self.memory.set_var(arr_name, arr)
+                        self.memory.update_line(line)
+                        self._emit(line, f"iota({arr_name}, {start_val}).",
+                                   {'type': 'assign', 'target': arr_name,
+                                    'value': str(start_val)})
+                except RuntimeError:
+                    pass
+            return _INT(0)
+
+        # ── count (algorithm) ───────────────────────────────────────────
+        if fn_name in ('count', 'std::count') and len(args) >= 3 and arg_cursors:
+            arr_name = self._find_arr_from_begin_cursor(arg_cursors[0])
+            target   = self._to_int(args[2]) if len(args) > 2 else 0
+            if arr_name:
+                try:
+                    arr = self.memory.get_var(arr_name)
+                    if isinstance(arr, dict) and arr.get('kind') == 'array':
+                        return _INT(sum(1 for v in arr.get('values', [])
+                                       if self._to_int(v) == target))
+                except RuntimeError:
+                    pass
+            return _INT(0)
+
+        # ── next_permutation / prev_permutation ─────────────────────────
+        if fn_name in ('next_permutation', 'std::next_permutation',
+                       'prev_permutation', 'std::prev_permutation') and arg_cursors:
+            arr_name = self._find_arr_from_begin_cursor(arg_cursors[0])
+            if arr_name:
+                try:
+                    arr = self.memory.get_var(arr_name)
+                    if isinstance(arr, dict) and arr.get('kind') == 'array':
+                        vals = [self._to_int(v) for v in arr.get('values', [])]
+                        import itertools as _it
+                        if 'next' in fn_name:
+                            # Find the next permutation manually
+                            i = len(vals) - 2
+                            while i >= 0 and vals[i] >= vals[i + 1]:
+                                i -= 1
+                            if i < 0:
+                                vals.sort()
+                                arr['values'] = vals
+                                self.memory.set_var(arr_name, arr)
+                                self._emit(line, f"next_permutation({arr_name}) → false (wrapped).",
+                                           {'type': 'assign', 'target': arr_name, 'value': 'perm'})
+                                return _INT(0)  # false: wrapped around
+                            j = len(vals) - 1
+                            while vals[j] <= vals[i]:
+                                j -= 1
+                            vals[i], vals[j] = vals[j], vals[i]
+                            vals[i + 1:] = vals[i + 1:][::-1]
+                        else:
+                            # prev_permutation
+                            i = len(vals) - 2
+                            while i >= 0 and vals[i] <= vals[i + 1]:
+                                i -= 1
+                            if i < 0:
+                                vals.sort(reverse=True)
+                                arr['values'] = vals
+                                self.memory.set_var(arr_name, arr)
+                                self._emit(line, f"prev_permutation({arr_name}) → false (wrapped).",
+                                           {'type': 'assign', 'target': arr_name, 'value': 'perm'})
+                                return _INT(0)  # false
+                            j = len(vals) - 1
+                            while vals[j] >= vals[i]:
+                                j -= 1
+                            vals[i], vals[j] = vals[j], vals[i]
+                            vals[i + 1:] = vals[i + 1:][::-1]
+                        arr['values'] = vals
+                        self.memory.set_var(arr_name, arr)
+                        self.memory.update_line(line)
+                        verb = 'next_permutation' if 'next' in fn_name else 'prev_permutation'
+                        self._emit(line, f"{verb}({arr_name}).",
+                                   {'type': 'assign', 'target': arr_name, 'value': 'perm'})
+                        return _INT(1)  # true: permutation exists
+                except RuntimeError:
+                    pass
+            return _INT(0)
+
+        # ── make_heap / push_heap / pop_heap ────────────────────────────
+        if fn_name in ('make_heap', 'std::make_heap',
+                       'push_heap', 'std::push_heap',
+                       'pop_heap',  'std::pop_heap') and arg_cursors:
+            arr_name = self._find_arr_from_begin_cursor(arg_cursors[0])
+            if arr_name:
+                try:
+                    arr = self.memory.get_var(arr_name)
+                    if isinstance(arr, dict) and arr.get('kind') == 'array':
+                        import heapq as _hq
+                        vals = [self._to_int(v) for v in arr.get('values', [])]
+                        if 'make_heap' in fn_name:
+                            _hq.heapify(vals)
+                            vals = [-x for x in sorted([-x for x in vals])]  # max-heap order
+                            # Simply sort descending for max-heap visual
+                            vals.sort(reverse=True)
+                        elif 'push_heap' in fn_name:
+                            vals.sort(reverse=True)
+                        elif 'pop_heap' in fn_name:
+                            if vals:
+                                # Move max to end, re-sort the rest
+                                vals.sort(reverse=True)
+                                # The user typically calls pop_back after pop_heap
+                                # We just re-sort for display; actual pop_back removes it
+                        arr['values'] = vals
+                        arr['lastWrite'] = [0] if vals else []
+                        self.memory.set_var(arr_name, arr)
+                        self.memory.update_line(line)
+                        verb = fn_name.replace('std::', '')
+                        self._emit(line, f"{verb}({arr_name}).",
+                                   {'type': 'assign', 'target': arr_name, 'value': 'heap'})
+                except RuntimeError:
+                    pass
+            return _INT(0)
+
+        # ── binary_search ────────────────────────────────────────────────
+        if fn_name in ('binary_search', 'std::binary_search') and arg_cursors:
+            arr_name = self._find_arr_from_begin_cursor(arg_cursors[0])
+            target = args[2] if len(args) > 2 else _INT(0)
+            if arr_name:
+                try:
+                    arr_val = self.memory.get_var(arr_name)
+                    if isinstance(arr_val, dict) and arr_val.get('kind') == 'array':
+                        import bisect as _bs
+                        vals = [self._to_int(v) for v in arr_val.get('values', [])]
+                        t = self._to_int(target)
+                        pos = _bs.bisect_left(vals, t)
+                        return _INT(1 if pos < len(vals) and vals[pos] == t else 0)
+                except RuntimeError:
+                    pass
+            return _INT(0)
+
+        # ── rotate ───────────────────────────────────────────────────────
+        if fn_name in ('rotate', 'std::rotate') and arg_cursors and len(arg_cursors) >= 2:
+            arr_name, k = self._sort_ptr_info(arg_cursors[1])
+            if arr_name is None:
+                arr_name = self._find_arr_from_begin_cursor(arg_cursors[0])
+                k = 0
+            if arr_name and k is not None and k > 0:
+                try:
+                    arr_val = self.memory.get_var(arr_name)
+                    if isinstance(arr_val, dict) and arr_val.get('kind') == 'array':
+                        vals = list(arr_val.get('values', []))
+                        n = len(vals)
+                        rk = k % n if n else 0
+                        if rk:
+                            arr_val['values'] = vals[rk:] + vals[:rk]
+                            arr_val['lastWrite'] = [0]
+                            self.memory.set_var(arr_name, arr_val)
+                            self.memory.update_line(line)
+                            self._emit(line, f"rotate({arr_name}, {rk}).",
+                                       {'type': 'assign', 'target': arr_name, 'value': 'rotated'})
+                except RuntimeError:
+                    pass
+            return _INT(0)
+
+        # ── unique ───────────────────────────────────────────────────────
+        if fn_name in ('unique', 'std::unique') and arg_cursors:
+            arr_name = self._find_arr_from_begin_cursor(arg_cursors[0])
+            if arr_name:
+                try:
+                    arr_val = self.memory.get_var(arr_name)
+                    if isinstance(arr_val, dict) and arr_val.get('kind') == 'array':
+                        vals = arr_val.get('values', [])
+                        new_vals: list = []
+                        for v in vals:
+                            if not new_vals or self._to_int(v) != self._to_int(new_vals[-1]):
+                                new_vals.append(v)
+                        unique_n = len(new_vals)
+                        arr_val['values'] = new_vals + list(vals[unique_n:])
+                        arr_val['lastWrite'] = [unique_n - 1] if new_vals else []
+                        self.memory.set_var(arr_name, arr_val)
+                        self.memory.update_line(line)
+                        self._emit(line, f"unique({arr_name}) → {unique_n} unique.",
+                                   {'type': 'assign', 'target': arr_name,
+                                    'value': f'unique[{unique_n}]'})
+                        return {'kind': 'iterator', 'data': arr_val.get('values', []),
+                                'idx': unique_n}
+                except RuntimeError:
+                    pass
+            return _INT(0)
+
+        # ── distance / advance ───────────────────────────────────────────
+        if fn_name in ('distance', 'std::distance') and len(args) >= 2:
+            it = args[1]
+            if isinstance(it, dict) and it.get('kind') == 'iterator':
+                idx = it.get('idx')
+                if idx is None:
+                    return _INT(len(it.get('data', [])))
+                return _INT(idx)
+            return _INT(self._to_int(it))
+        if fn_name in ('advance', 'std::advance') and len(args) >= 2 and arg_cursors:
+            it = args[0]
+            n  = self._to_int(args[1])
+            if isinstance(it, dict) and it.get('kind') == 'iterator':
+                idx = it.get('idx')
+                if idx is not None:
+                    self._write_lval(arg_cursors[0], {**it, 'idx': idx + n}, line)
+            return _INT(0)
+
+        # ── transform ────────────────────────────────────────────────────
+        if fn_name in ('transform', 'std::transform') and arg_cursors and len(arg_cursors) >= 3:
+            src_name = self._find_arr_from_begin_cursor(arg_cursors[0])
+            # 4-arg form: transform(s.begin, s.end, d.begin, op) — unary op on src → dst
+            # 3-arg form: transform(begin, end, begin2, op) or transform(begin, end, out, op)
+            # We handle the common unary-transform-in-place pattern (src == dst)
+            op_cursor = arg_cursors[3] if len(arg_cursors) >= 4 else (
+                arg_cursors[2] if len(arg_cursors) == 3 else None)
+            if src_name and op_cursor is not None:
+                try:
+                    arr = self.memory.get_var(src_name)
+                    if isinstance(arr, dict) and arr.get('kind') == 'array':
+                        vals = arr.get('values', [])
+                        new_vals = []
+                        for v in vals:
+                            result = self._call_function_value(op_cursor, [v], line)
+                            new_vals.append(result if result is not None else v)
+                        arr['values'] = new_vals
+                        arr['lastWrite'] = [len(new_vals) - 1] if new_vals else []
+                        self.memory.set_var(src_name, arr)
+                        self.memory.update_line(line)
+                        self._emit(line, f"transform({src_name}).",
+                                   {'type': 'assign', 'target': src_name, 'value': 'transformed'})
+                except (RuntimeError, Exception):
+                    pass
+            return _INT(0)
+
+        # ── any_of / all_of / none_of ────────────────────────────────────
+        if fn_name in ('any_of', 'std::any_of',
+                       'all_of', 'std::all_of',
+                       'none_of', 'std::none_of') and arg_cursors and len(arg_cursors) >= 3:
+            arr_name = self._find_arr_from_begin_cursor(arg_cursors[0])
+            pred_cursor = arg_cursors[2]
+            if arr_name:
+                try:
+                    arr = self.memory.get_var(arr_name)
+                    if isinstance(arr, dict) and arr.get('kind') == 'array':
+                        vals = arr.get('values', [])
+                        results = []
+                        for v in vals:
+                            r = self._call_function_value(pred_cursor, [v], line)
+                            results.append(self._truthy(r))
+                        base = fn_name.replace('std::', '')
+                        if base == 'any_of':  return _INT(int(any(results)))
+                        if base == 'all_of':  return _INT(int(all(results)))
+                        if base == 'none_of': return _INT(int(not any(results)))
+                except (RuntimeError, Exception):
+                    pass
+            return _INT(0)
+
+        # ── find_if / count_if ───────────────────────────────────────────
+        if fn_name in ('find_if', 'std::find_if',
+                       'find_if_not', 'std::find_if_not') and arg_cursors and len(arg_cursors) >= 3:
+            arr_name = self._find_arr_from_begin_cursor(arg_cursors[0])
+            pred_cursor = arg_cursors[2]
+            if arr_name:
+                try:
+                    arr = self.memory.get_var(arr_name)
+                    if isinstance(arr, dict) and arr.get('kind') == 'array':
+                        vals = arr.get('values', [])
+                        invert = 'not' in fn_name
+                        for i, v in enumerate(vals):
+                            r = self._call_function_value(pred_cursor, [v], line)
+                            match = self._truthy(r)
+                            if invert: match = not match
+                            if match:
+                                return {'kind': 'iterator', 'data': vals, 'idx': i}
+                        return {'kind': 'iterator', 'data': vals, 'idx': None}
+                except (RuntimeError, Exception):
+                    pass
+            return _INT(0)
+        if fn_name in ('count_if', 'std::count_if') and arg_cursors and len(arg_cursors) >= 3:
+            arr_name = self._find_arr_from_begin_cursor(arg_cursors[0])
+            pred_cursor = arg_cursors[2]
+            if arr_name:
+                try:
+                    arr = self.memory.get_var(arr_name)
+                    if isinstance(arr, dict) and arr.get('kind') == 'array':
+                        vals = arr.get('values', [])
+                        cnt = sum(1 for v in vals
+                                  if self._truthy(self._call_function_value(pred_cursor, [v], line)))
+                        return _INT(cnt)
+                except (RuntimeError, Exception):
+                    pass
+            return _INT(0)
+
+        # ── copy / copy_if ───────────────────────────────────────────────
+        if fn_name in ('copy', 'std::copy') and arg_cursors and len(arg_cursors) >= 3:
+            src_name = self._find_arr_from_begin_cursor(arg_cursors[0])
+            dst_name = self._find_arr_from_begin_cursor(arg_cursors[2])
+            if src_name and dst_name and src_name != dst_name:
+                try:
+                    src = self.memory.get_var(src_name)
+                    dst = self.memory.get_var(dst_name)
+                    if (isinstance(src, dict) and src.get('kind') == 'array' and
+                            isinstance(dst, dict) and dst.get('kind') == 'array'):
+                        import copy as _cp
+                        dst['values'] = list(_cp.deepcopy(src.get('values', [])))
+                        dst['lastWrite'] = [len(dst['values']) - 1] if dst['values'] else []
+                        self.memory.set_var(dst_name, dst)
+                        self.memory.update_line(line)
+                        self._emit(line, f"copy({src_name} → {dst_name}).",
+                                   {'type': 'assign', 'target': dst_name, 'value': 'copied'})
+                except (RuntimeError, Exception):
+                    pass
+            return _INT(0)
 
         if fn_name in ('make_pair', 'std::make_pair') and len(args) >= 2:
             return self._make_pair(args[0], args[1])
@@ -2965,6 +3468,49 @@ class CppInterpreter:
                    {'type': 'return', 'function': frame_name, 'value': self._fmt(ret_val)})
         self.memory.pop_frame()
         return ret_val if ret_val is not None else _INT(0)
+
+    def _call_function_value(self, cursor, args: list, line: int) -> dict:
+        """Call a callable from a cursor (lambda expr, stored lambda name, or user function).
+        Used by transform, any_of, all_of, none_of, find_if, count_if."""
+        if cursor is None:
+            return _INT(0)
+        uw = self._unwrap(cursor) or cursor
+
+        # Direct lambda expression
+        if uw.kind == CK.LAMBDA_EXPR:
+            lch = self._ch(uw)
+            params = [c for c in lch if c.kind == CK.PARM_DECL]
+            body   = next((c for c in lch if c.kind == CK.COMPOUND_STMT), None)
+            if not body:
+                return _INT(0)
+            self.memory.push_frame('<lambda>', line)
+            for param, arg_val in zip(params, args):
+                if param.spelling:
+                    self.memory.declare_var(param.spelling, arg_val)
+            ret_val = _INT(0)
+            try:
+                self._exec_compound(body)
+            except ReturnException as r:
+                ret_val = r.value if r.value is not None else _INT(0)
+            finally:
+                self.memory.pop_frame()
+            return ret_val
+
+        # Reference to a stored lambda or user function
+        if uw.kind == CK.DECL_REF_EXPR:
+            name = uw.spelling
+            if name in self._lambda_store:
+                return self._call_stored_lambda(name, args, line)
+            if name in self.func_defs:
+                return self._call_user_function(name, args, line)
+
+        # Unexposed / paren: recurse
+        if uw.kind in (CK.UNEXPOSED_EXPR, CK.PAREN_EXPR):
+            ch = self._ch(uw)
+            if ch:
+                return self._call_function_value(ch[0], args, line)
+
+        return _INT(0)
 
     def _call_user_function(self, fn_name: str, args: list, line: int,
                             arg_cursors=None) -> dict:
@@ -3955,6 +4501,16 @@ class CppInterpreter:
             data[:] = []
             save()
             return _INT(0)
+        if method_name in ('lower_bound', 'upper_bound'):
+            key_val = args[0] if args else _INT(0)
+            target = self._to_int(key_val)
+            for i, e in enumerate(data):
+                ev = self._to_int(_eval_e(e))
+                if method_name == 'lower_bound' and ev >= target:
+                    return _mk_iter(i)
+                if method_name == 'upper_bound' and ev > target:
+                    return _mk_iter(i)
+            return _end_iter()
         return _INT(0)
 
     def _call_map_method(self, obj_name: str, obj_type: str, method_name: str,
@@ -4065,6 +4621,16 @@ class CppInterpreter:
                 data[:] = []
             save()
             return _INT(0)
+        if method_name in ('lower_bound', 'upper_bound') and isinstance(data, list):
+            key_val = args[0] if args else _INT(0)
+            target = self._to_int(key_val)
+            for i, e in enumerate(data):
+                ev = self._to_int(_eval_e(e))
+                if method_name == 'lower_bound' and ev >= target:
+                    return _mk_iter(i)
+                if method_name == 'upper_bound' and ev > target:
+                    return _mk_iter(i)
+            return _end_iter()
         return _INT(0)
 
     def _call_string_method(self, obj_name: str, obj_c, method_name: str,
