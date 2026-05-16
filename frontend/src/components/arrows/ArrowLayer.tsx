@@ -1,4 +1,4 @@
-import { useLayoutEffect, useState } from 'react';
+import { useLayoutEffect, useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { useRefRegistry } from '../../contexts/refRegistry';
 import { useExecutionStore } from '../../store/executionStore';
@@ -57,6 +57,15 @@ export default function ArrowLayer({ tick }: { tick: number }) {
   const { getEl, canvasRef } = useRefRegistry();
   const { currentFrame }      = useExecutionStore();
   const [arrows, setArrows]   = useState<Arrow[]>([]);
+  const [resizeTick, setResizeTick] = useState(0);
+
+  // Recompute arrows whenever the canvas is resized (panel drag, window resize).
+  useEffect(() => {
+    if (!canvasRef.current) return;
+    const ro = new ResizeObserver(() => setResizeTick(t => t + 1));
+    ro.observe(canvasRef.current);
+    return () => ro.disconnect();
+  }, [canvasRef]);
 
   useLayoutEffect(() => {
     if (!canvasRef.current) return;
@@ -166,7 +175,7 @@ export default function ArrowLayer({ tick }: { tick: number }) {
     });
 
     setArrows(computed);
-  }, [tick, currentFrame, getEl, canvasRef]);
+  }, [tick, resizeTick, currentFrame, getEl, canvasRef]);
 
   const colorOf = (s: Arrow['state']) =>
     s === 'valid' ? '#22c55e' : s === 'freed' ? '#ef4444' : '#4b5563';
