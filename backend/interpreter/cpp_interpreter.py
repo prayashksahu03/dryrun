@@ -1121,8 +1121,12 @@ class CppInterpreter:
         if   op == '+':  result = lv + rv
         elif op == '-':  result = lv - rv
         elif op == '*':  result = lv * rv
-        elif op == '/':  result = (lv // rv) if rv != 0 else 0
-        elif op == '%':  result = (lv %  rv) if rv != 0 else 0
+        elif op == '/':
+            if rv == 0: self._crash(cursor.location.line, 'division-by-zero', 'Division by zero')
+            result = lv // rv
+        elif op == '%':
+            if rv == 0: self._crash(cursor.location.line, 'division-by-zero', 'Modulo by zero')
+            result = lv % rv
         elif op == '==': result = int(lv == rv)
         elif op == '!=': result = int(lv != rv)
         elif op == '<':  result = int(lv <  rv)
@@ -1388,12 +1392,21 @@ class CppInterpreter:
                 row = self._to_int(self._eval(ich[1]))
                 arr_val = self._eval(ich[0])
                 vals = arr_val.get('values', []) if isinstance(arr_val, dict) else []
-                try:
-                    row_list = vals[row]
-                    cell     = row_list[idx] if isinstance(row_list, list) else row_list
-                    return _INT(int(cell))
-                except (IndexError, TypeError):
-                    return _INT(0)
+                line = cursor.location.line
+                n_rows = arr_val.get('rows')
+                n_cols = arr_val.get('cols')
+                row_bound = n_rows if n_rows is not None else (arr_val.get('declared_size') or len(vals))
+                if not (0 <= row < row_bound):
+                    self._crash(line, 'out-of-bounds',
+                                f"Row index {row} out of bounds for {row_bound}-row vector")
+                row_list = vals[row] if row < len(vals) else []
+                col_bound = n_cols if n_cols is not None else (len(row_list) if isinstance(row_list, list) else 0)
+                if isinstance(row_list, list):
+                    if not (0 <= idx < col_bound):
+                        self._crash(line, 'out-of-bounds',
+                                    f"Column index {idx} out of bounds for {col_bound}-element row")
+                    return _INT(int(row_list[idx]))
+                return _INT(int(row_list)) if isinstance(row_list, (int, float)) else row_list
 
         arr_val = self._eval(arr_c)
         if isinstance(arr_val, dict) and arr_val.get('kind') == 'char':
@@ -2518,13 +2531,16 @@ class CppInterpreter:
             try:
                 return _INT(int(sv.strip()))
             except (ValueError, AttributeError):
-                return _INT(0)
+                self._crash(line, 'invalid-argument',
+                            f"stoi: no valid integer in string \"{sv.strip()}\"")
         if fn_name in ('stoll', 'std::stoll') and args:
             sv = args[0].get('value', '0') if isinstance(args[0], dict) else str(args[0])
             try:
                 return _INT(int(sv.strip()))
             except (ValueError, AttributeError):
-                return _INT(0)
+                self._crash(line, 'invalid-argument',
+                            f"stoll: no valid integer in string \"{sv.strip()}\"")
+
         if fn_name in ('make_pair', 'std::make_pair') and len(args) >= 2:
             return self._make_pair(args[0], args[1])
         if fn_name == 'pair' and len(args) >= 2:
@@ -4461,18 +4477,31 @@ class CppInterpreter:
                             f"Index {i} out of bounds for array of size {declared or len(vals)}")
         elif len(indices) == 2:
             r, c = indices
-            declared_c = len(vals[0]) if vals and isinstance(vals[0], list) else 0
-            if 0 <= r and (declared is None or r < declared):
+            n_rows = arr.get('rows')
+            n_cols = arr.get('cols')
+            # Matrix-style vectors (rows/cols set): strict bounds. Adjacency lists: allow extension.
+            if n_rows is not None and not (0 <= r < n_rows):
+                if line:
+                    self._crash(line, 'out-of-bounds',
+                                f"Row index {r} out of bounds for {n_rows}x{n_cols} matrix")
+            elif declared is not None and not (0 <= r < declared):
+                if line:
+                    self._crash(line, 'out-of-bounds',
+                                f"Row index {r} out of bounds for array of size {declared}")
+            else:
+                declared_c = len(vals[0]) if vals and isinstance(vals[0], list) else 0
                 if len(vals) <= r:
                     vals.extend([[0] * declared_c if declared_c else [] for _ in range(r - len(vals) + 1)])
                 row = vals[r]
                 if isinstance(row, list):
-                    if len(row) <= c:
-                        row.extend([0] * (c - len(row) + 1))
-                    row[c] = store_val
-            elif line:
-                self._crash(line, 'out-of-bounds',
-                            f"Row index {r} out of bounds for array of size {declared or len(vals)}")
+                    if n_cols is not None and not (0 <= c < n_cols):
+                        if line:
+                            self._crash(line, 'out-of-bounds',
+                                        f"Column index {c} out of bounds for {n_cols}-element row")
+                    else:
+                        if len(row) <= c:
+                            row.extend([0] * (c - len(row) + 1))
+                        row[c] = store_val
         arr['values']    = vals
         arr['lastWrite'] = list(indices)
         # Return a display-friendly value for emit messages
