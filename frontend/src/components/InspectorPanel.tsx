@@ -2,19 +2,42 @@ import { useRef, useState } from 'react';
 import { useExecutionStore, PanelKey } from '../store/executionStore';
 import { StepEvent } from '../types/trace';
 import CallTreePanel from './CallTreePanel';
+import ErrorExplainer from './ErrorExplainer';
 
-function eventLabel(e: StepEvent): { label: string; color: string } {
+const CRASH_LABELS: Record<string, string> = {
+  'null-deref':        'Null Pointer Dereference',
+  'use-after-free':    'Use After Free',
+  'double-free':       'Double Free',
+  'out-of-bounds':     'Array Out Of Bounds',
+  'stack-overflow':    'Stack Overflow',
+  'division-by-zero':  'Division By Zero',
+  'out_of_range':      'Container Underflow',
+  'invalid-argument':  'Invalid Argument',
+  'segfault':          'Segmentation Fault',
+  'assert':            'Assertion Failed',
+};
+
+function eventLabel(e: StepEvent): { label: string; color: string; rowBg?: string } {
   switch (e.type) {
-    case 'malloc':  return { label: `malloc → ${e.address}`, color: 'text-green-400' };
-    case 'free':    return { label: `free(${e.address})`,    color: 'text-orange-400' };
-    case 'assign':  return { label: `${e.target} = ${e.value}`, color: 'text-amber-400' };
-    case 'crash':   return { label: `CRASH: ${e.kind}`,      color: 'text-red-400' };
-    case 'start':   return { label: 'program start',         color: 'text-zinc-500' };
-    case 'end':     return { label: 'program end',           color: 'text-zinc-500' };
-    case 'call':    return { label: `call ${e.function}()`,  color: 'text-blue-400' };
-    case 'return':  return { label: `return`,                color: 'text-zinc-500' };
-    case 'output':  return { label: `› ${(e as {type:'output';text:string}).text.trimEnd()}`, color: 'text-green-400' };
-    default:        return { label: '—',                     color: 'text-zinc-600' };
+    case 'malloc':   return { label: `malloc → ${e.address}`,  color: 'text-green-400' };
+    case 'free':     return { label: `free(${e.address})`,     color: 'text-orange-400' };
+    case 'assign':   return { label: `${e.target} = ${e.value}`, color: 'text-amber-400' };
+    case 'crash':    return {
+      label:  `✕ ${CRASH_LABELS[e.kind] ?? e.kind}`,
+      color:  'text-red-400',
+      rowBg:  'rgba(239,68,68,0.08)',
+    };
+    case 'warning':  return {
+      label:  `⚠ ${e.kind === 'int-overflow' ? 'Integer Overflow' : e.kind}`,
+      color:  'text-amber-400',
+      rowBg:  'rgba(251,191,36,0.07)',
+    };
+    case 'start':    return { label: 'program start',           color: 'text-zinc-500' };
+    case 'end':      return { label: 'program end',             color: 'text-zinc-500' };
+    case 'call':     return { label: `call ${e.function}()`,    color: 'text-blue-400' };
+    case 'return':   return { label: 'return',                  color: 'text-zinc-500' };
+    case 'output':   return { label: `› ${(e as {type:'output';text:string}).text.trimEnd()}`, color: 'text-green-400' };
+    default:         return { label: '—',                       color: 'text-zinc-600' };
   }
 }
 
@@ -147,12 +170,13 @@ export default function InspectorPanel() {
           <div className="px-3 py-2 text-[10px] text-zinc-600 uppercase tracking-widest font-mono flex-shrink-0">Event Log</div>
           <div className="flex-1 overflow-y-auto px-3 pb-3 space-y-1">
             {(trace?.steps ?? []).slice(0, currentStep + 1).map((step, i) => {
-              const { label, color } = eventLabel(step.event);
+              const { label, color, rowBg } = eventLabel(step.event);
               const isLatest = i === currentStep;
               return (
                 <div
                   key={i}
-                  className={`flex items-start gap-2 py-0.5 ${isLatest ? 'opacity-100' : 'opacity-40'}`}
+                  className={`flex items-start gap-2 py-0.5 rounded ${isLatest ? 'opacity-100' : 'opacity-40'}`}
+                  style={isLatest && rowBg ? { background: rowBg, marginLeft: -4, paddingLeft: 4, paddingRight: 4 } : undefined}
                 >
                   <span className="text-zinc-700 text-[10px] font-mono w-4 flex-shrink-0">{i + 1}</span>
                   <span className={`text-[10px] font-mono ${color}${step.event.type === 'output' ? ' whitespace-pre-wrap' : ''}`}>{label}</span>
@@ -165,17 +189,13 @@ export default function InspectorPanel() {
         <div className="flex-1" />
       )}
 
-      {/* Trace-too-long warning */}
-      {frame?.event.type === 'end' && (frame.event as {type:'end';truncated?:boolean}).truncated && (
-        <div className="px-3 py-2 border-t border-indigo-500/30 bg-indigo-500/5 text-indigo-300 text-[10px] font-mono leading-relaxed flex-shrink-0">
-          Trace limit reached. Try a smaller input to see the full execution.
-        </div>
-      )}
+      {/* Error / warning explainer */}
+      <ErrorExplainer />
 
       {/* Leak warning */}
       {frame?.event.type === 'end' && leakedAddrs.length > 0 && (
         <div className="px-3 py-2 border-t border-amber-500/30 bg-amber-500/5 text-amber-400 text-[10px] font-mono flex-shrink-0">
-          ⚠ {leakedAddrs.length} block{leakedAddrs.length > 1 ? 's' : ''} leaked
+          ⚠ {leakedAddrs.length} block{leakedAddrs.length > 1 ? 's' : ''} leaked — memory not freed before program exit
         </div>
       )}
     </div>

@@ -106,11 +106,21 @@ export default function App() {
           )}
         </div>
         <div className="flex items-center gap-3">
-          {isCrash && (
-            <span className="px-2 py-0.5 rounded bg-red-500/20 text-red-400 text-xs font-mono border border-red-500/30 animate-pulse">
-              SEGFAULT
-            </span>
-          )}
+          {isCrash && (() => {
+            const ev = frame?.event as { type: 'crash'; kind: string } | undefined;
+            const LABELS: Record<string, string> = {
+              'null-deref': 'NULL DEREF', 'use-after-free': 'USE AFTER FREE',
+              'double-free': 'DOUBLE FREE', 'out-of-bounds': 'OUT OF BOUNDS',
+              'stack-overflow': 'STACK OVERFLOW', 'division-by-zero': 'DIV BY ZERO',
+              'out_of_range': 'UNDERFLOW', 'segfault': 'SEGFAULT',
+            };
+            const label = ev ? (LABELS[ev.kind] ?? ev.kind.toUpperCase()) : 'CRASH';
+            return (
+              <span className="px-2 py-0.5 rounded bg-red-500/20 text-red-400 text-xs font-mono border border-red-500/30 animate-pulse">
+                ✕ {label}
+              </span>
+            );
+          })()}
           {trace && (
             <span className="text-zinc-600 text-xs font-mono">
               step {currentStep + 1}<span className="text-zinc-700">/{trace.steps.length}</span>

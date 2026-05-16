@@ -1232,6 +1232,15 @@ class CppInterpreter:
         elif op == '<<': result = lv << (rv % 32)
         elif op == '>>': result = lv >> (rv % 32)
         else:            result = 0
+
+        # Integer overflow detection: warn and wrap to 32-bit signed range
+        if op in ('+', '-', '*') and (result > 2147483647 or result < -2147483648):
+            wrapped = (result + 2**31) % 2**32 - 2**31
+            self._warn(cursor.location.line, 'int-overflow',
+                       f'Integer overflow: {lv} {op} {rv} = {result} '
+                       f'(exceeds 32-bit int range, wraps to {wrapped})')
+            result = wrapped
+
         return _INT(result)
 
     def _eval_compound_assign(self, cursor) -> dict:
@@ -5137,6 +5146,19 @@ class CppInterpreter:
                 return {'kind': 'pointer', 'address': addr, 'offset': new_offset}
         # Struct pointer or unknown — keep address, record offset (used for dangling checks)
         return {'kind': 'pointer', 'address': addr, 'offset': new_offset}
+
+    def _warn(self, line: int, kind: str, message: str):
+        """Emit a non-fatal warning step. Execution continues after this."""
+        adj  = self._adj(line)
+        desc = f'⚠ Line {adj}: {message}' if adj > 0 else f'⚠ {message}'
+        self.memory.update_line(line)
+        self.trace.append({
+            'index':       len(self.trace),
+            'line':        adj,
+            'description': desc,
+            'event': {'type': 'warning', 'kind': kind, 'message': message},
+            'memory':      self.memory.snapshot(),
+        })
 
     def _crash(self, line: int, kind: str, message: str):
         """Emit a crash step and raise SegFaultError to stop execution."""

@@ -40,10 +40,16 @@ export type StepEvent =
   | { type: 'call';    function: string; args?: string[] }
   | { type: 'return';  function: string; value?: string }
   | { type: 'crash';   kind: CrashKind; address?: string; message: string }
+  | { type: 'warning'; kind: WarningKind; message: string }
   | { type: 'end';     leaks: string[]; truncated?: boolean }
   | { type: 'output';  text: string };
 
-export type CrashKind = 'null-deref' | 'use-after-free' | 'double-free' | 'stack-overflow' | 'out-of-bounds' | 'segfault';
+export type CrashKind =
+  | 'null-deref' | 'use-after-free' | 'double-free'
+  | 'stack-overflow' | 'out-of-bounds' | 'segfault'
+  | 'division-by-zero' | 'out_of_range' | 'invalid-argument' | 'assert';
+
+export type WarningKind = 'int-overflow';
 
 export interface TraceStep {
   index: number;
