@@ -91,7 +91,7 @@ int main() {
 function EditorMode() {
   const {
     editorSource, setEditorSource, stdinInput, setStdinInput,
-    runCode, isLoading, error, loadDemo, language,
+    runCode, isLoading, error, language,
     trace, currentFrame, clearTrace,
   } = useExecutionStore();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -145,13 +145,6 @@ function EditorMode() {
         </div>
         <div />
         <div className="flex items-center gap-2">
-          <button
-            onClick={loadDemo}
-            className="text-[10px] font-mono text-zinc-600 hover:text-zinc-400 transition-colors px-1.5 py-0.5 rounded hover:bg-zinc-800"
-            title="Load dangling pointer demo"
-          >
-            demo
-          </button>
           <button
             data-tour="run-button"
             onClick={runCode}
