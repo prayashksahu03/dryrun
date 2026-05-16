@@ -283,10 +283,16 @@ function EditorMode() {
         <div className={`px-4 py-2.5 border-t text-xs font-mono leading-relaxed flex-shrink-0 ${
           isCrash
             ? 'border-red-500/40 bg-red-500/10 text-red-300'
-            : 'border-zinc-800/60 bg-zinc-900/40 text-zinc-400'
+            : frame?.event.type === 'output'
+              ? 'border-green-500/20 bg-green-500/5 text-green-400'
+              : 'border-zinc-800/60 bg-zinc-900/40 text-zinc-400'
         }`}>
           {isCrash && <span className="text-red-400 font-semibold mr-1.5">CRASH</span>}
-          {frame?.description ?? 'Step through with → or press Space to play.'}
+          {frame?.event.type === 'output'
+            ? <pre className="whitespace-pre-wrap text-xs font-mono text-green-400 leading-relaxed m-0">
+                {'› '}{(frame.event as { type: 'output'; text: string }).text.trimEnd()}
+              </pre>
+            : (frame?.description ?? 'Step through with → or press Space to play.')}
         </div>
       ) : error ? (
         <div className="border-t border-red-500/40 bg-[#110a0a] flex-shrink-0">
