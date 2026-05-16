@@ -2135,6 +2135,22 @@ class CppInterpreter:
             self._emit(line, f"{lbl}[{idx}] = {v}.",
                        {'type': 'assign', 'target': f'{lbl}[{idx}]', 'value': str(v)})
             return
+        # String subscript write: s[i] = c  (char-kind variables)
+        if isinstance(arr_val, dict) and arr_val.get('kind') == 'char':
+            s = arr_val.get('value', '')
+            if isinstance(rval, dict) and rval.get('kind') == 'char':
+                new_ch = rval.get('value', '')[:1]
+            else:
+                c_int = self._to_int(rval)
+                new_ch = chr(c_int) if 0 < c_int < 128 else ''
+            if 0 <= idx < len(s):
+                new_s = s[:idx] + new_ch + s[idx + 1:]
+                arr_val['value'] = new_s
+                self._put_array(arr_name, arr_c, arr_val, line)
+                lbl = arr_name or 's'
+                self._emit(line, f"{lbl}[{idx}] = '{new_ch}'.",
+                           {'type': 'assign', 'target': f'{lbl}[{idx}]', 'value': new_ch})
+            return
         # Pointer-subscript write: ptr[i] = val → store in heap block's _arr field
         if isinstance(arr_val, dict) and arr_val.get('kind') == 'pointer':
             addr = arr_val.get('address')
@@ -2202,6 +2218,23 @@ class CppInterpreter:
             self._put_array(arr_name, obj_c, arr_val, line)
             self._emit(line, f"{lbl}[{idx}] = {v}.",
                        {'type': 'assign', 'target': f'{lbl}[{idx}]', 'value': str(v)})
+            return
+        # String operator[] write: s[i] = c
+        if isinstance(arr_val, dict) and arr_val.get('kind') == 'char':
+            s = arr_val.get('value', '')
+            if isinstance(rval, dict) and rval.get('kind') == 'char':
+                new_ch = rval.get('value', '')[:1]
+            else:
+                c_int = self._to_int(rval)
+                new_ch = chr(c_int) if 0 < c_int < 128 else ''
+            if 0 <= idx < len(s):
+                new_s = s[:idx] + new_ch + s[idx + 1:]
+                arr_val['value'] = new_s
+                if arr_name:
+                    self.memory.set_var(arr_name, arr_val)
+                self.memory.update_line(line)
+                self._emit(line, f"{lbl}[{idx}] = '{new_ch}'.",
+                           {'type': 'assign', 'target': f'{lbl}[{idx}]', 'value': new_ch})
 
     # ── Array resolution / storage ──────────────────────────────────────────
 
@@ -2541,6 +2574,22 @@ class CppInterpreter:
             except (ValueError, AttributeError):
                 self._crash(line, 'invalid-argument',
                             f"stoll: no valid integer in string \"{sv.strip()}\"")
+        if fn_name in ('stoul', 'std::stoul', 'stoull', 'std::stoull') and args:
+            sv = args[0].get('value', '0') if isinstance(args[0], dict) else str(args[0])
+            try:
+                return _INT(int(sv.strip()))
+            except (ValueError, AttributeError):
+                self._crash(line, 'invalid-argument',
+                            f"stoul: no valid integer in string \"{sv.strip()}\"")
+        if fn_name in ('stof', 'std::stof', 'stod', 'std::stod', 'stold', 'std::stold') and args:
+            sv = args[0].get('value', '0') if isinstance(args[0], dict) else str(args[0])
+            try:
+                return {'kind': 'float', 'value': float(sv.strip())}
+            except (ValueError, AttributeError):
+                self._crash(line, 'invalid-argument',
+                            f"stof: no valid number in string \"{sv.strip()}\"")
+        if fn_name in ('to_wstring', 'std::to_wstring') and args:
+            return {'kind': 'char', 'value': str(self._to_int(args[0]))}
 
         if fn_name in ('make_pair', 'std::make_pair') and len(args) >= 2:
             return self._make_pair(args[0], args[1])
@@ -2800,6 +2849,15 @@ class CppInterpreter:
                     pass
                 slice_lo = lo
                 slice_hi = hi
+
+        # sort(s.begin(), s.end()) — char-kind string
+        if isinstance(arr_val, dict) and arr_val.get('kind') == 'char' and arr_name:
+            s = arr_val.get('value', '')
+            sorted_s = ''.join(sorted(s))
+            self.memory.set_var(arr_name, {'kind': 'char', 'value': sorted_s})
+            self._emit(line, f'sort({arr_name}).',
+                       {'type': 'assign', 'target': arr_name, 'value': sorted_s})
+            return _INT(0)
 
         if not isinstance(arr_val, dict) or arr_val.get('kind') != 'array':
             return _INT(0)
@@ -4066,6 +4124,76 @@ class CppInterpreter:
             if s: save(s[:-1])
             return _INT(0)
         if method_name in ('begin', 'end'):
+            return _INT(0)
+        if method_name == 'erase':
+            if not args:
+                save('')
+                return {'kind': 'char', 'value': s}
+            pos = self._to_int(args[0])
+            if len(args) > 1:
+                ln = self._to_int(args[1])
+                new_s = s[:pos] + s[pos + ln:]
+            else:
+                new_s = s[:pos]
+            save(new_s)
+            self._emit(line, f"{real_name}.erase({pos}).",
+                       {'type': 'assign', 'target': real_name, 'value': new_s})
+            return {'kind': 'char', 'value': s}
+        if method_name == 'insert':
+            if len(args) >= 2:
+                pos = self._to_int(args[0])
+                a1 = args[1]
+                if isinstance(a1, dict) and a1.get('kind') == 'char':
+                    ins = a1.get('value', '')
+                elif isinstance(a1, (int, float)):
+                    ins = chr(int(a1)) if 0 < int(a1) < 128 else ''
+                else:
+                    ins = str(a1) if a1 is not None else ''
+                new_s = s[:pos] + ins + s[pos:]
+                save(new_s)
+                self._emit(line, f"{real_name}.insert({pos}, ...).",
+                           {'type': 'assign', 'target': real_name, 'value': new_s})
+                return {'kind': 'char', 'value': new_s}
+            return {'kind': 'char', 'value': s}
+        if method_name == 'replace':
+            if len(args) >= 3:
+                pos = self._to_int(args[0])
+                ln  = self._to_int(args[1])
+                rep = args[2].get('value', '') if isinstance(args[2], dict) else str(args[2])
+                new_s = s[:pos] + rep + s[pos + ln:]
+                save(new_s)
+                self._emit(line, f"{real_name}.replace({pos}, {ln}, ...).",
+                           {'type': 'assign', 'target': real_name, 'value': new_s})
+                return {'kind': 'char', 'value': new_s}
+            return {'kind': 'char', 'value': s}
+        if method_name == 'at':
+            idx = self._to_int(args[0]) if args else 0
+            if not (0 <= idx < len(s)):
+                self._crash(line, 'out-of-bounds',
+                            f"string::at: index {idx} out of range (size={len(s)})")
+            return {'kind': 'char', 'value': s[idx]}
+        if method_name == 'compare':
+            other = args[0].get('value', '') if (args and isinstance(args[0], dict)) else ''
+            result = (s > other) - (s < other)
+            return _INT(result)
+        if method_name == 'rfind':
+            needle = args[0].get('value', '') if (args and isinstance(args[0], dict)) else ''
+            if isinstance(args[0], dict) and args[0].get('kind') == 'char' and len(needle) != 1:
+                needle = needle  # substring rfind
+            result = s.rfind(needle)
+            return _INT(result)
+        if method_name == 'c_str':
+            return {'kind': 'char', 'value': s}
+        if method_name == 'resize':
+            new_len = self._to_int(args[0]) if args else len(s)
+            fill_ch = args[1].get('value', '\0')[:1] if len(args) > 1 and isinstance(args[1], dict) else '\0'
+            if new_len > len(s):
+                new_s = s + fill_ch * (new_len - len(s))
+            else:
+                new_s = s[:new_len]
+            save(new_s)
+            return _INT(0)
+        if method_name == 'reserve':
             return _INT(0)
         return _INT(0)
 
