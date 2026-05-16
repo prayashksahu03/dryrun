@@ -209,10 +209,12 @@ export default function StackFrameComponent({
             // DSU parent-array detection (1D, all values in [0, n))
             if (!val.rows && !val.cols && DSU_NAMES.has(name)) {
               const vals = val.values as number[];
-              const isDSU = vals.length > 0 && vals.every(
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                v => { const x = typeof v === 'number' ? v : (v as any)?.value ?? 0; return x >= 0 && x < vals.length; }
-              );
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const toIdx = (v: unknown) => { const x = typeof v === 'number' ? v : (v as any)?.value ?? 0; return typeof x === 'number' ? x : 0; };
+              const allInRange = vals.length > 0 && vals.every(v => { const x = toIdx(v); return x >= 0 && x < vals.length; });
+              // Reject all-same arrays (e.g. zero-initialized globals before init() runs)
+              const allSame = vals.length > 1 && vals.every(v => toIdx(v) === toIdx(vals[0]));
+              const isDSU = allInRange && !allSame;
               if (isDSU) {
                 return (
                   <div key={name} className="px-1.5 pb-1">

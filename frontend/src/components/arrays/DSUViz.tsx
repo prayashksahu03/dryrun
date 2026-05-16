@@ -41,10 +41,14 @@ function layoutForest(
   }
 
   // Assign x positions: spread trees evenly
-  let cursor = H_GAP;
+  // Place each root at the center of its subtree's horizontal span so children
+  // never overflow to negative x.
+  let cursor = H_GAP / 2;
   for (const root of roots) {
+    const sz = subtreeSize(root, children);
+    cursor += (sz / 2) * H_GAP;
     placeSubtree(root, cursor, 0, children, positions);
-    cursor += subtreeSize(root, children) * H_GAP + H_GAP;
+    cursor += (sz / 2) * H_GAP + H_GAP;
   }
 
   return positions;
