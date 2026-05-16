@@ -45,7 +45,7 @@ export default function StringViz({
         <span className="text-zinc-700 ml-1">str[{chars.length}]</span>
       </div>
 
-      <div className="overflow-x-auto" style={{ scrollbarWidth: 'thin', scrollbarColor: '#3f3f46 transparent' }}>
+      <div className="overflow-x-auto no-scrollbar">
         <div ref={scrollRef} className="flex items-end gap-0" style={{ width: 'max-content' }}>
           {chars.map((ch, i) => {
             const isHi      = i === lastWrite;

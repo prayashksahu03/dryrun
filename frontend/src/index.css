@@ -36,6 +36,14 @@ html, body, #root {
   display: none;
 }
 
+/* Scrollable but no visible scrollbar */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 /* Arrow glow */
 .arrow-valid {
   filter: drop-shadow(0 0 3px rgba(34, 197, 94, 0.4));

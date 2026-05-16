@@ -83,7 +83,7 @@ function Array1D({
         <span className="text-zinc-700 ml-1">[{values.length}]</span>
       </div>
 
-      <div className="overflow-x-auto" style={{ scrollbarWidth: 'thin', scrollbarColor: '#3f3f46 transparent' }}>
+      <div className="overflow-x-auto no-scrollbar">
         <div ref={scrollRef} className="flex items-end gap-0" style={{ width: 'max-content' }}>
           {values.map((v, i) => {
             const isHi = i === hi;
