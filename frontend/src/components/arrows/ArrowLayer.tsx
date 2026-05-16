@@ -20,6 +20,7 @@ function bezier(
   from: { x: number; y: number },
   to:   { x: number; y: number },
   arcAbove?: boolean,
+  forceVertical?: boolean,
 ): string {
   const dx = to.x - from.x;
   const dy = to.y - from.y;
@@ -31,9 +32,9 @@ function bezier(
     return `M ${from.x} ${from.y} C ${from.x} ${ctrlY}, ${to.x} ${ctrlY}, ${to.x} ${to.y}`;
   }
 
-  // Stack→heap arrows travel mostly vertically. Use vertical control points so
-  // the curve goes straight down then curves into the target — never looping up.
-  if (Math.abs(dy) > Math.abs(dx) * 0.6) {
+  // forceVertical: used for stack→heap arrows so they go straight down first
+  // then curve to the target, regardless of the dx/dy aspect ratio.
+  if (forceVertical || Math.abs(dy) > Math.abs(dx) * 0.6) {
     const cy = Math.max(Math.abs(dy) * 0.45, 24);
     return `M ${from.x} ${from.y} C ${from.x} ${from.y + cy}, ${to.x} ${to.y - cy}, ${to.x} ${to.y}`;
   }
@@ -139,9 +140,9 @@ export default function ArrowLayer({ tick }: { tick: number }) {
         to  = rectEdge(tgtRect, 'top', canvasRect);
         mid = arcMid(from, to);
       } else {
-        // If source is significantly above target, land on the top of the block
-        // so the vertical bezier arrives naturally. Otherwise use left edge (horizontal).
-        const landOnTop = (tgtRect.top - srcRect.bottom) > 40;
+        // Stack→heap: always land on top and go vertically (down-first arc).
+        // Heap→heap forward: land on top when there's a big vertical gap, else left edge.
+        const landOnTop = !isHeapArrow || (tgtRect.top - srcRect.bottom) > 40;
         to  = rectEdge(tgtRect, landOnTop ? 'top' : 'left', canvasRect);
         const rawMid = midpoint(from, to);
         mid = { x: rawMid.x, y: rawMid.y - 8 };
@@ -149,7 +150,7 @@ export default function ArrowLayer({ tick }: { tick: number }) {
 
       computed.push({
         id, label,
-        path: bezier(from, to, arcAbove),
+        path: bezier(from, to, arcAbove, !isHeapArrow),
         midX: mid.x, midY: mid.y,
         state: isFreed ? 'freed' : 'valid',
       });
