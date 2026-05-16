@@ -115,10 +115,14 @@ export default function ArrowLayer({ tick }: { tick: number }) {
         backRefs.push({ id, label, from, to, blockBottom, tgtBottom, state: isFreed ? 'freed' : 'valid', span });
 
       } else if (!isHeapArrow) {
-        // ── Corridor 1: stack→heap L-shape ────────────────────────────────
-        const to = rectEdge(tgtRect, 'top', canvasRect);
-        const path = lPath(from, to);
-        computed.push({ id, label, path, midX: (from.x + to.x) / 2, midY: from.y - 8, state: isFreed ? 'freed' : 'valid' });
+        // ── Corridor 1: stack→heap ─────────────────────────────────────────
+        // Drop vertically at (tgtRect.left - 8), left of the block column, so
+        // the path never passes through blocks that sit above the target.
+        // Then enter the target from its left edge at mid-height.
+        const to   = rectEdge(tgtRect, 'left', canvasRect);
+        const xDrop = (tgtRect.left - canvasRect.left) - 8;
+        const path  = `M ${from.x} ${from.y} L ${xDrop} ${from.y} L ${xDrop} ${to.y} L ${to.x} ${to.y}`;
+        computed.push({ id, label, path, midX: (from.x + xDrop) / 2, midY: from.y - 8, state: isFreed ? 'freed' : 'valid' });
 
       } else {
         // ── Corridor 2: heap→heap forward link ────────────────────────────
