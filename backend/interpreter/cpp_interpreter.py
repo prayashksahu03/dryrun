@@ -455,6 +455,18 @@ class CppInterpreter:
                 # Only user-defined structs (not stub declarations)
                 if child.location.line > self._line_offset:
                     self._collect_class(child)
+            elif k == CK.TYPEDEF_DECL and child.location.line > self._line_offset:
+                # Handle: typedef struct Node { ... } Node;
+                # The STRUCT_DECL is nested inside TYPEDEF_DECL so collect it here.
+                typedef_name = child.spelling
+                for sub in self._ch(child):
+                    if sub.kind == CK.STRUCT_DECL and sub.is_definition():
+                        self._collect_class(sub)
+                        # If anonymous struct (no spelling), also register under typedef name
+                        struct_name = sub.spelling or typedef_name
+                        if typedef_name and typedef_name not in self.class_defs and struct_name in self.class_defs:
+                            self.class_defs[typedef_name] = self.class_defs[struct_name]
+                        break
             elif k == CK.VAR_DECL and child.location.line > self._line_offset:
                 self._global_var_cursors.append(child)
 
@@ -2485,19 +2497,32 @@ class CppInterpreter:
             # Try to extract struct type from sizeof(TypeName) argument
             struct_name = 'unknown'
             if arg_cursors:
-                def _find_type_ref(cur):
-                    for c in self._ch(cur):
-                        if c.kind == CK.TYPE_REF:
-                            return c.spelling.replace('struct ', '').replace('class ', '').strip()
-                        found = _find_type_ref(c)
-                        if found:
-                            return found
-                    return None
-                candidate = _find_type_ref(arg_cursors[0])
-                if not candidate and arg_cursors[0].type:
-                    candidate = arg_cursors[0].type.spelling.replace('struct ', '').replace('class ', '').replace('*', '').strip()
-                if candidate and candidate in self.class_defs:
-                    struct_name = candidate
+                import re as _re
+                # Most reliable: parse tokens of the sizeof expression for the type name
+                tok = arg_cursors[0].spelling or ''
+                m = _re.search(r'sizeof\s*\(\s*(?:struct\s+|class\s+)?(\w+)\s*\)', tok)
+                if m and m.group(1) in self.class_defs:
+                    struct_name = m.group(1)
+                else:
+                    # Fallback: walk cursor tree for TYPE_REF
+                    def _find_type_ref(cur):
+                        for c in self._ch(cur):
+                            if c.kind == CK.TYPE_REF:
+                                name = c.spelling.replace('struct ', '').replace('class ', '').strip()
+                                if name in self.class_defs:
+                                    return name
+                            if hasattr(c, 'type') and c.type and c.type.spelling:
+                                t = c.type.spelling
+                                name = t.replace('struct ', '').replace('class ', '').replace('*', '').strip()
+                                if name in self.class_defs:
+                                    return name
+                            found = _find_type_ref(c)
+                            if found:
+                                return found
+                        return None
+                    candidate = _find_type_ref(arg_cursors[0])
+                    if candidate:
+                        struct_name = candidate
             addr  = self.memory.malloc(struct_name, line)
             block = self.memory.heap[addr]
             if struct_name == 'unknown':
