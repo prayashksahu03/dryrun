@@ -13,7 +13,7 @@ function eventLabel(e: StepEvent): { label: string; color: string } {
     case 'end':     return { label: 'program end',           color: 'text-zinc-500' };
     case 'call':    return { label: `call ${e.function}()`,  color: 'text-blue-400' };
     case 'return':  return { label: `return`,                color: 'text-zinc-500' };
-    case 'output':  return { label: `› ${(e as {type:'output';text:string}).text.replace(/\n/g,'↵')}`, color: 'text-green-400' };
+    case 'output':  return { label: `› ${(e as {type:'output';text:string}).text.trimEnd()}`, color: 'text-green-400' };
     default:        return { label: '—',                     color: 'text-zinc-600' };
   }
 }
@@ -155,7 +155,7 @@ export default function InspectorPanel() {
                   className={`flex items-start gap-2 py-0.5 ${isLatest ? 'opacity-100' : 'opacity-40'}`}
                 >
                   <span className="text-zinc-700 text-[10px] font-mono w-4 flex-shrink-0">{i + 1}</span>
-                  <span className={`text-[10px] font-mono ${color}`}>{label}</span>
+                  <span className={`text-[10px] font-mono ${color}${step.event.type === 'output' ? ' whitespace-pre-wrap' : ''}`}>{label}</span>
                 </div>
               );
             })}
