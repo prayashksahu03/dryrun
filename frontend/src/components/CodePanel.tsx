@@ -86,15 +86,31 @@ int main() {
 `;
 
 
-// ── Editor mode ───────────────────────────────────────────────────────
+// ── Code panel (always editable, overlays trace highlight when active) ──
 
 function EditorMode() {
-  const { editorSource, setEditorSource, stdinInput, setStdinInput, runCode, isLoading, error, loadDemo, language } =
-    useExecutionStore();
+  const {
+    editorSource, setEditorSource, stdinInput, setStdinInput,
+    runCode, isLoading, error, loadDemo, language,
+    trace, currentFrame, clearTrace,
+  } = useExecutionStore();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const activeLineRef = useRef<HTMLDivElement>(null);
+  const gutterRef = useRef<HTMLDivElement>(null);
   const [stdinOpen, setStdinOpen] = useState(true);
   const errorLine   = error ? parseErrorLine(error) : null;
   const errorType   = error ? parseErrorType(error) : null;
+
+  const frame       = currentFrame();
+  const currentLine = frame?.line ?? -1;
+  const isCrash     = frame?.event.type === 'crash';
+
+  // Scroll gutter to keep active line visible when stepping
+  useEffect(() => {
+    if (activeLineRef.current && gutterRef.current) {
+      activeLineRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }, [currentLine]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
@@ -163,24 +179,48 @@ function EditorMode() {
       <div className="flex-1 flex overflow-hidden relative">
         {/* Line gutter */}
         <div
+          ref={gutterRef}
           className="flex-shrink-0 w-10 text-right py-3 pr-2 text-xs font-mono leading-relaxed select-none overflow-hidden bg-[#0d0d0f] pointer-events-none"
           aria-hidden
         >
           {lines.map((_, i) => {
             const ln = i + 1;
             const isErr = errorLine === ln;
+            const isActive = trace && ln === currentLine;
+            const isCrashLn = isActive && isCrash;
             return (
-              <div key={i} className={`leading-[1.6rem] pr-1 ${isErr ? 'text-red-400' : 'text-zinc-700'}`}>
-                {isErr ? '✕' : ln}
+              <div
+                key={i}
+                ref={isActive ? activeLineRef : undefined}
+                className={`leading-[1.6rem] pr-1 ${
+                  isCrashLn ? 'text-red-400' : isActive ? 'text-amber-400' : isErr ? 'text-red-400' : 'text-zinc-700'
+                }`}
+              >
+                {isCrashLn ? '✕' : isActive ? '▶' : isErr ? '✕' : ln}
               </div>
             );
           })}
         </div>
 
-        {/* Error stripe */}
-        {errorLine && errorLine <= lines.length && (
+        {/* Active-line highlight stripe (trace mode) */}
+        {trace && currentLine > 0 && currentLine <= lines.length && (
           <div
-            className="absolute pointer-events-none"
+            className="absolute pointer-events-none z-0"
+            style={{
+              top: `calc(0.75rem + ${(currentLine - 1) * 1.6}rem)`,
+              left: 40,
+              right: 0,
+              height: '1.6rem',
+              background: isCrash ? 'rgba(239,68,68,0.1)' : 'rgba(251,191,36,0.07)',
+              borderLeft: `2px solid ${isCrash ? 'rgba(239,68,68,0.5)' : 'rgba(251,191,36,0.4)'}`,
+            }}
+          />
+        )}
+
+        {/* Error stripe (compile/parse error, no trace) */}
+        {!trace && errorLine && errorLine <= lines.length && (
+          <div
+            className="absolute pointer-events-none z-0"
             style={{
               top: `calc(0.75rem + ${(errorLine - 1) * 1.6}rem)`,
               left: 40,
@@ -195,7 +235,7 @@ function EditorMode() {
         <textarea
           ref={textareaRef}
           value={editorSource}
-          onChange={e => setEditorSource(e.target.value)}
+          onChange={e => { clearTrace(); setEditorSource(e.target.value); }}
           onKeyDown={handleKeyDown}
           spellCheck={false}
           className="flex-1 bg-transparent text-zinc-300 text-xs font-mono leading-[1.6rem] py-3 pr-4 resize-none outline-none border-none relative z-10"
@@ -237,8 +277,17 @@ function EditorMode() {
         </div>
       )}
 
-      {/* Error / hint bar */}
-      {error ? (
+      {/* Bottom bar: frame description (trace) | error | hint */}
+      {trace ? (
+        <div className={`px-4 py-2.5 border-t text-xs font-mono leading-relaxed flex-shrink-0 ${
+          isCrash
+            ? 'border-red-500/40 bg-red-500/10 text-red-300'
+            : 'border-zinc-800/60 bg-zinc-900/40 text-zinc-400'
+        }`}>
+          {isCrash && <span className="text-red-400 font-semibold mr-1.5">CRASH</span>}
+          {frame?.description ?? 'Step through with → or press Space to play.'}
+        </div>
+      ) : error ? (
         <div className="border-t border-red-500/40 bg-[#110a0a] flex-shrink-0">
           <div className="flex items-center gap-2 px-3 py-2 border-b border-red-500/20">
             <span className="flex-shrink-0 w-4 h-4 rounded-full bg-red-500/20 border border-red-500/50 flex items-center justify-center text-[9px] text-red-400 font-bold">!</span>
@@ -262,119 +311,6 @@ function EditorMode() {
   );
 }
 
-// ── Debug mode (trace loaded) ─────────────────────────────────────────
-
-function DebugMode() {
-  const { trace, currentFrame, clearTrace, language, stdinInput, setStdinInput } = useExecutionStore();
-  const frame       = currentFrame();
-  const currentLine = frame?.line ?? -1;
-  const isCrash     = frame?.event.type === 'crash';
-  const lines       = (trace?.source ?? '').split('\n');
-  const scrollRef   = useRef<HTMLDivElement>(null);
-  const activeRef   = useRef<HTMLDivElement>(null);
-  const [stdinOpen, setStdinOpen] = useState(true);
-
-  useEffect(() => {
-    if (activeRef.current && scrollRef.current) {
-      activeRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    }
-  }, [currentLine]);
-
-  return (
-    <div data-tour="code-editor" className="flex flex-col border-r border-zinc-800/60 overflow-hidden bg-[#0d0d0f] h-full w-full">
-      <div data-tour="code-toolbar" className="flex items-center justify-between px-3 h-9 border-b border-zinc-800/60 bg-[#111113]">
-        <div className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-full bg-red-500/60" />
-          <span className="w-2.5 h-2.5 rounded-full bg-yellow-500/60" />
-          <span className="w-2.5 h-2.5 rounded-full bg-green-500/60" />
-          <span className="ml-2 text-xs text-zinc-500 font-mono">{LANG_FILE[language]}</span>
-        </div>
-        <button
-          onClick={clearTrace}
-          className="text-[10px] font-mono text-zinc-600 hover:text-violet-400 transition-colors px-2 py-0.5 rounded hover:bg-zinc-800 border border-transparent hover:border-zinc-700"
-        >
-          ← edit code
-        </button>
-      </div>
-
-      <div ref={scrollRef} className="flex-1 overflow-y-auto py-2">
-        {lines.map((line, i) => {
-          const ln        = i + 1;
-          const isActive  = ln === currentLine;
-          const isCrashLn = isCrash && isActive;
-
-          return (
-            <div
-              key={i}
-              ref={isActive ? activeRef : undefined}
-              className={`flex items-stretch min-h-[1.6rem] transition-colors duration-100 ${
-                isCrashLn ? 'bg-red-500/15' : isActive ? 'bg-amber-500/10' : ''
-              }`}
-            >
-              <div className={`w-10 flex-shrink-0 text-right pr-3 pt-0.5 text-xs select-none font-mono ${
-                isActive ? (isCrashLn ? 'text-red-400' : 'text-amber-400') : 'text-zinc-700'
-              }`}>
-                {ln}
-              </div>
-              <div className="w-4 flex-shrink-0 flex items-center justify-center">
-                {isCrashLn && <span className="text-red-400 text-xs leading-none">✕</span>}
-                {isActive && !isCrashLn && <span className="text-amber-400 text-xs leading-none">▶</span>}
-              </div>
-              <div
-                className={`flex-1 pr-4 pt-0.5 text-xs font-mono leading-relaxed whitespace-pre ${
-                  isCrashLn ? 'text-red-300' : isActive ? 'text-zinc-100' : 'text-zinc-400'
-                }`}
-                dangerouslySetInnerHTML={{ __html: highlight(line, language) || ' ' }}
-              />
-            </div>
-          );
-        })}
-      </div>
-
-      <div className="border-t border-zinc-800/60 flex-shrink-0">
-        <button
-          onClick={() => setStdinOpen(o => !o)}
-          className="w-full flex items-center justify-between px-3 py-1.5 hover:bg-zinc-800/40 transition-colors"
-        >
-          <span className="flex items-center gap-1.5 text-[10px] font-mono text-cyan-600/80">
-            <span className={`transition-transform duration-150 text-[8px] ${stdinOpen ? 'rotate-90' : ''}`}>▶</span>
-            stdin
-          </span>
-          {stdinInput.trim() ? (
-            <span className="text-cyan-700 text-[9px] font-mono">
-              {stdinInput.trim().split(/\s+/).length} token{stdinInput.trim().split(/\s+/).length !== 1 ? 's' : ''}
-            </span>
-          ) : (
-            <span className="text-zinc-700 text-[9px] font-mono">values for cin &gt;&gt;</span>
-          )}
-        </button>
-        {stdinOpen && (
-          <textarea
-            value={stdinInput}
-            onChange={e => setStdinInput(e.target.value)}
-            placeholder="Space or newline separated values for cin&#10;e.g.  5  hello  3.14"
-            spellCheck={false}
-            className="w-full bg-[#080809] text-cyan-300 text-[11px] font-mono px-3 py-2 resize-none outline-none border-none leading-relaxed placeholder:text-zinc-700"
-            style={{ height: 56, caretColor: '#22d3ee', borderTop: '1px solid rgba(34,211,238,0.08)' }}
-          />
-        )}
-      </div>
-
-      <div className={`px-4 py-2.5 border-t text-xs font-mono leading-relaxed flex-shrink-0 ${
-        isCrash
-          ? 'border-red-500/40 bg-red-500/10 text-red-300'
-          : 'border-zinc-800/60 bg-zinc-900/40 text-zinc-400'
-      }`}>
-        {isCrash && <span className="text-red-400 font-semibold mr-1.5">CRASH</span>}
-        {frame?.description ?? 'Step through with → or press Space to play.'}
-      </div>
-    </div>
-  );
-}
-
-// ── Export ────────────────────────────────────────────────────────────
-
 export default function CodePanel() {
-  const { trace } = useExecutionStore();
-  return trace ? <DebugMode /> : <EditorMode />;
+  return <EditorMode />;
 }
