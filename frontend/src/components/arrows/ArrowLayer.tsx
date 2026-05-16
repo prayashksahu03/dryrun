@@ -12,27 +12,24 @@ interface Arrow {
   state: 'valid' | 'freed' | 'null';
 }
 
-// All paths are normalized to M P0 L P1 L P2 L P3 so Framer Motion
-// can interpolate smoothly between different routing shapes.
+// All paths use M-L-L-L (4 points, 3 segments) for consistent Framer Motion animation.
 
-function straightPath(
-  from: { x: number; y: number },
-  to:   { x: number; y: number },
-): string {
-  const x1 = from.x + (to.x - from.x) / 3;
-  const y1 = from.y + (to.y - from.y) / 3;
-  const x2 = from.x + (to.x - from.x) * 2 / 3;
-  const y2 = from.y + (to.y - from.y) * 2 / 3;
+// L-shape: horizontal first (to target x), then vertical down.
+// Each stack variable uses its own y-level for the horizontal arm → no two arms share a segment.
+function lPath(from: { x: number; y: number }, to: { x: number; y: number }): string {
+  const midY = from.y + (to.y - from.y) * 0.5;
+  return `M ${from.x} ${from.y} L ${to.x} ${from.y} L ${to.x} ${midY} L ${to.x} ${to.y}`;
+}
+
+// Straight diagonal, split into 3 equal segments so it matches the 4-point format.
+function straightPath(from: { x: number; y: number }, to: { x: number; y: number }): string {
+  const x1 = from.x + (to.x - from.x) / 3, y1 = from.y + (to.y - from.y) / 3;
+  const x2 = from.x + (to.x - from.x) * 2 / 3, y2 = from.y + (to.y - from.y) * 2 / 3;
   return `M ${from.x} ${from.y} L ${x1} ${y1} L ${x2} ${y2} L ${to.x} ${to.y}`;
 }
 
-// Orthogonal U-route that drops below yFloor:
-//   P0 → straight down to (P0.x, yFloor) → left/right to (P3.x, yFloor) → up to P3
-function orthoPath(
-  from: { x: number; y: number },
-  to:   { x: number; y: number },
-  yFloor: number,
-): string {
+// Orthogonal U: down → horizontal at yFloor → up. Used for back-references.
+function orthoPath(from: { x: number; y: number }, to: { x: number; y: number }, yFloor: number): string {
   return `M ${from.x} ${from.y} L ${from.x} ${yFloor} L ${to.x} ${yFloor} L ${to.x} ${to.y}`;
 }
 
@@ -80,12 +77,7 @@ export default function ArrowLayer({ tick }: { tick: number }) {
 
       if (!targetAddr) {
         const to = { x: from.x + 16, y: from.y + 10 };
-        computed.push({
-          id, label,
-          path: straightPath(from, to),
-          midX: (from.x + to.x) / 2, midY: (from.y + to.y) / 2 - 6,
-          state: 'null',
-        });
+        computed.push({ id, label, path: straightPath(from, to), midX: (from.x+to.x)/2, midY: (from.y+to.y)/2-6, state: 'null' });
         return;
       }
 
@@ -103,29 +95,32 @@ export default function ArrowLayer({ tick }: { tick: number }) {
       let midY: number;
 
       if (isSelf || isBackRef) {
-        // ── Corridor 3: orthogonal U below the blocks ─────────────────────
-        // Find the bottom of the source block so the U clears it.
-        const srcBlockKey = isHeapArrow ? srcKey.replace(/:([^:]+)$/, '') : null;
-        const srcBlockEl  = srcBlockKey ? getEl(srcBlockKey) : null;
+        // ── Corridor 3: orthogonal U below blocks ──────────────────────────
+        // Completely separate from the corridors above (stack arrows land on
+        // block tops, forward links at block mid-level, back-refs go under).
+        const srcBlockEl = getEl(srcKey.replace(/:([^:]+)$/, ''));
         const srcBlockBottom = srcBlockEl
           ? srcBlockEl.getBoundingClientRect().bottom
           : srcRect.bottom;
         const yFloor = Math.max(srcBlockBottom, tgtRect.bottom) - canvasRect.top + 28;
-
         const to = rectEdge(tgtRect, 'bottom', canvasRect);
-        path  = orthoPath(from, to, yFloor);
-        midX  = (from.x + to.x) / 2;
-        midY  = yFloor - 8; // label inside the U, just above the floor
+        path = orthoPath(from, to, yFloor);
+        midX = (from.x + to.x) / 2;
+        midY = yFloor - 8;
 
       } else if (!isHeapArrow) {
-        // ── Corridor 1: stack→heap straight diagonal, land on block top ───
+        // ── Corridor 1: stack→heap L-shape ────────────────────────────────
+        // Each variable exits at its own y-level (from.y), travels horizontally
+        // to the block's x column, then drops vertically to the block top.
+        // Since each arrow uses a unique y for the horizontal arm, no two arms
+        // ever share a segment — guaranteed non-overlap.
         const to = rectEdge(tgtRect, 'top', canvasRect);
-        path = straightPath(from, to);
-        midX = (from.x + to.x) / 2;
-        midY = (from.y + to.y) / 2 - 8;
+        path = lPath(from, to);
+        midX = (from.x + to.x) / 2;  // middle of the horizontal arm
+        midY = from.y - 8;             // label just above the horizontal arm
 
       } else {
-        // ── Corridor 2: heap→heap forward link, straight to left edge ─────
+        // ── Corridor 2: heap→heap forward link ────────────────────────────
         const landOnTop = (tgtRect.top - srcRect.bottom) > 40;
         const to = rectEdge(tgtRect, landOnTop ? 'top' : 'left', canvasRect);
         path = straightPath(from, to);
@@ -137,9 +132,7 @@ export default function ArrowLayer({ tick }: { tick: number }) {
     };
 
     const stack = frame.memory.stack;
-    const activeFrames = stack.length <= 1
-      ? stack
-      : [stack[0], stack[stack.length - 1]];
+    const activeFrames = stack.length <= 1 ? stack : [stack[0], stack[stack.length - 1]];
 
     activeFrames.forEach(sf => {
       Object.entries(sf.variables).forEach(([varName, val]) => {
@@ -183,12 +176,12 @@ export default function ArrowLayer({ tick }: { tick: number }) {
         return (
           <g key={arrow.id}>
             <motion.path d={arrow.path} animate={{ d: arrow.path }} transition={{ duration: 0.25, ease: 'easeInOut' }}
-              stroke={color} strokeWidth={5} fill="none" opacity={0.08} strokeLinecap="round" />
+              stroke={color} strokeWidth={4} fill="none" opacity={0.08} strokeLinecap="square" />
             <motion.path d={arrow.path} animate={{ d: arrow.path }} transition={{ duration: 0.25, ease: 'easeInOut' }}
               stroke={color} strokeWidth={1.5} fill="none"
               strokeDasharray={isDash ? '5 3' : undefined}
               markerEnd={`url(#ah-${arrow.state})`}
-              strokeLinecap="square" opacity={0.9} />
+              strokeLinecap="square" opacity={0.85} />
             <motion.text animate={{ x: arrow.midX, y: arrow.midY }} transition={{ duration: 0.25, ease: 'easeInOut' }}
               fill={color} fontSize={9} fontFamily="JetBrains Mono, monospace" textAnchor="middle" opacity={0.65}>
               {arrow.label}
