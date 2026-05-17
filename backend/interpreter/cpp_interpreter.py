@@ -321,6 +321,8 @@ class CppInterpreter:
         # Heuristic detection state
         self._queue_push_log: dict = {}   # queue_name -> list of int values pushed (#7/#21)
         self._iter_sources:   dict = {}   # iter_var_name -> container_name (#14)
+        self._vec_buf_addrs:  dict = {}   # var_name -> current fake buffer addr
+        self._vec_iter_vars:  dict = {}   # range_name -> synthetic iter var name in frame
 
     # ── Preprocessing ───────────────────────────────────────────────────────
 
@@ -4317,6 +4319,19 @@ class CppInterpreter:
         range_container_name = self._cursor_name(range_c) if range_c else None
         initial_container_size = len(elements)
 
+        # ── Iterator invalidation visualization (#14) ──────────────────────────
+        # Allocate a fake heap block for the vector's internal buffer so that
+        # when push_back reallocates, we can free the old block and show the
+        # iterator pointer as dangling (red arrow in the UI).
+        iter_var_name = None
+        if range_container_name and not binding_vars:
+            buf_addr = self._vec_alloc_buf(range_container_name, initial_container_size, line)
+            iter_var_name = f"__{range_container_name}_iter"
+            iter_ptr = {'kind': 'pointer', 'address': buf_addr}
+            self.memory.declare_var(iter_var_name, iter_ptr)
+            self._iter_sources[range_container_name] = iter_var_name
+            self._vec_iter_vars[range_container_name] = iter_var_name
+
         iters = 0
         for i, elem in enumerate(elements):
             if iters >= MAX_ITERS:
@@ -4349,10 +4364,23 @@ class CppInterpreter:
                     if isinstance(cur_val, dict) and cur_val.get('kind') == 'array':
                         cur_size = len(cur_val.get('values', []))
                         if cur_size != initial_container_size:
+                            # Free old buffer, alloc new — shows dangling iter in heap
+                            self._vec_free_buf(range_container_name, line)
+                            new_addr = self._vec_alloc_buf(range_container_name, cur_size, line)
+                            # Update the synthetic iter pointer to still point to OLD (freed) addr
+                            if iter_var_name:
+                                old_addr = None
+                                for blk_addr, blk in self.memory.heap.items():
+                                    if (blk.get('typeName', '').startswith(f'{range_container_name}[ ]')
+                                            and blk.get('state') == 'freed'):
+                                        old_addr = blk_addr
+                                if old_addr:
+                                    self.memory.set_var(iter_var_name,
+                                                        {'kind': 'pointer', 'address': old_addr})
                             self._warn(line, 'modify-during-iter',
                                        f"Container '{range_container_name}' changed size from "
                                        f"{initial_container_size} to {cur_size} during range-for iteration. "
-                                       f"Modifying a container while iterating it is undefined behavior (#15).")
+                                       f"Vector reallocated — all iterators are now dangling (#14/#15).")
                             initial_container_size = cur_size
                 except RuntimeError:
                     pass
@@ -4371,6 +4399,16 @@ class CppInterpreter:
                             self.memory.set_var(range_name, range_arr)
                 except RuntimeError:
                     pass
+
+        # Clean up synthetic iter pointer after loop ends
+        if iter_var_name and range_container_name:
+            self._iter_sources.pop(range_container_name, None)
+            self._vec_iter_vars.pop(range_container_name, None)
+            # Remove iter var from current frame so it doesn't persist
+            for frame in reversed(self.memory.stack):
+                if iter_var_name in frame['variables']:
+                    del frame['variables'][iter_var_name]
+                    break
 
     # ── Queue / stack / deque method dispatch ────────────────────────────────
 
@@ -5273,6 +5311,34 @@ class CppInterpreter:
                 return {'kind': 'pointer', 'address': addr, 'offset': new_offset}
         # Struct pointer or unknown — keep address, record offset (used for dangling checks)
         return {'kind': 'pointer', 'address': addr, 'offset': new_offset}
+
+    # ── Vector buffer heap simulation (iterator invalidation visualization) ──
+
+    def _vec_alloc_buf(self, name: str, size: int, line: int) -> str:
+        """Inject a synthetic heap block representing a vector's internal buffer."""
+        from .memory import _new_addr
+        addr = _new_addr()
+        self.memory.heap[addr] = {
+            'address': addr,
+            'size': size,
+            'typeName': f'{name}[ ] buffer',
+            'state': 'allocated',
+            'fields': {},
+            'allocatedAtLine': line,
+        }
+        self._vec_buf_addrs[name] = addr
+        self._emit(line, f"{name} buffer allocated at {addr}",
+                   {'type': 'malloc', 'address': addr, 'size': size, 'typeName': f'{name}[ ] buffer'})
+        return addr
+
+    def _vec_free_buf(self, name: str, line: int):
+        """Mark a vector's current buffer as freed (reallocation)."""
+        addr = self._vec_buf_addrs.get(name)
+        if addr and addr in self.memory.heap:
+            self.memory.heap[addr]['state'] = 'freed'
+            self.memory.heap[addr]['freedAtLine'] = line
+            self._emit(line, f"{name} buffer freed — reallocation",
+                       {'type': 'free', 'address': addr})
 
     def _warn(self, line: int, kind: str, message: str):
         """Emit a non-fatal warning step. Execution continues after this."""
