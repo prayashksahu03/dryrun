@@ -4419,7 +4419,8 @@ class CppInterpreter:
             self._emit(line, f"{real_name}.push({self._fmt(val)}).",
                        {'type': 'assign', 'target': real_name, 'value': self._fmt(val)})
             # Queue duplicate detection (#7/#21 Wrong BFS Visited Timing / Missing Visited Array)
-            if col.get('ctype') in ('queue', ''):
+            ctype_str = col.get('ctype', '')
+            if 'queue' in ctype_str and 'priority_queue' not in ctype_str:
                 pushed_int = self._to_int(val)
                 if real_name not in self._queue_push_log:
                     self._queue_push_log[real_name] = {}
