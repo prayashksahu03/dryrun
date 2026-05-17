@@ -291,12 +291,6 @@ export default function ErrorExplainer() {
                 {title}
               </span>
             </div>
-            <span
-              className="text-[9px] font-mono px-1.5 py-0.5 rounded"
-              style={{ background: 'rgba(255,255,255,0.04)', color: 'rgba(113,113,122,0.7)', border: '1px solid rgba(255,255,255,0.06)' }}
-            >
-              #{catNum}/35
-            </span>
           </div>
 
           {/* Body */}
