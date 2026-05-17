@@ -27,11 +27,15 @@ function eventLabel(e: StepEvent): { label: string; color: string; rowBg?: strin
       color:  'text-red-400',
       rowBg:  'rgba(239,68,68,0.08)',
     };
-    case 'warning':  return {
-      label:  `⚠ ${e.kind === 'int-overflow' ? 'Integer Overflow' : e.kind}`,
-      color:  'text-amber-400',
-      rowBg:  'rgba(251,191,36,0.07)',
-    };
+    case 'warning': {
+      const wkind: string = e.kind;
+      const WARNING_LABELS: Record<string, string> = { 'int-overflow': 'Integer Overflow' };
+      return {
+        label: `⚠ ${WARNING_LABELS[wkind] ?? wkind}`,
+        color: 'text-amber-400',
+        rowBg: 'rgba(251,191,36,0.07)',
+      };
+    }
     case 'start':    return { label: 'program start',           color: 'text-zinc-500' };
     case 'end':      return { label: 'program end',             color: 'text-zinc-500' };
     case 'call':     return { label: `call ${e.function}()`,    color: 'text-blue-400' };
