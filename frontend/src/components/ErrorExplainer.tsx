@@ -230,6 +230,7 @@ export default function ErrorExplainer() {
   }
 
   const visible = info !== null || isInfiniteLoop;
+  if (!visible) return null;
 
   const isCrash   = info?.severity === 'crash';
   const isWarning = info?.severity === 'warning';
@@ -265,8 +266,7 @@ export default function ErrorExplainer() {
 
   return (
     <AnimatePresence>
-      {visible && (
-        <motion.div
+      <motion.div
           key="error-explainer"
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
@@ -323,7 +323,6 @@ export default function ErrorExplainer() {
             </p>
           </div>
         </motion.div>
-      )}
     </AnimatePresence>
   );
 }
