@@ -4333,7 +4333,9 @@ class CppInterpreter:
                 self._bind_structured(binding_vars, val, line)
             else:
                 self.memory.declare_var(loop_var_name, val)
-            self.memory.update_line(line)
+                self.memory.update_line(line)
+                self._emit(line, f"{loop_var_name} = {self._fmt(val)}",
+                           {'type': 'assign', 'target': loop_var_name, 'value': self._fmt(val)})
             try:
                 self._exec_stmt(body_c)
             except BreakException:
