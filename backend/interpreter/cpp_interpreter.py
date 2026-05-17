@@ -773,6 +773,14 @@ class CppInterpreter:
         # ── set / unordered_set ──
         if any(ct in type_spell for ct in ('set<', 'unordered_set<')):
             val = {'kind': 'set', 'data': [], 'label': type_spell}
+            non_tr = [c for c in children if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
+            if non_tr:
+                for ev in self._extract_set_init_values(non_tr[0]):
+                    key = self._make_map_key(ev)
+                    if not any(e['key'] == key for e in val['data']):
+                        val['data'].append({'key': key, 'val': ev})
+                if 'unordered_set' not in type_spell:
+                    val['data'].sort(key=lambda e: self._set_sort_key(e['key']))
             self.memory.declare_var(name, val)
             self.memory.update_line(line)
             self._emit(line, f"Declare {name} (set).",
@@ -2102,17 +2110,27 @@ class CppInterpreter:
         # Run constructor if we know this class
         if base in self.class_defs:
             cd  = self.class_defs[base]
-            # Collect ctor args from the CXX_NEW_EXPR's CALL_EXPR child
-            ctor_args = []
+            # Collect ctor args from the CXX_NEW_EXPR's CALL_EXPR child,
+            # or values from INIT_LIST_EXPR for aggregate initialization (new Node{1, nullptr})
+            ctor_args    = []
+            init_values  = None
             for c in self._ch(cursor):
                 if c.kind == CK.CALL_EXPR:
-                    # args are all children that are not TYPE_REF/TEMPLATE_REF
                     ctor_args = [self._eval(a) for a in self._ch(c)
                                  if a.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF,
-                                                   CK.DECL_REF_EXPR)]
+                                                   CK.NAMESPACE_REF, CK.DECL_REF_EXPR)]
+                    break
+                elif c.kind == CK.INIT_LIST_EXPR:
+                    init_values = [self._eval(a) for a in self._ch(c)]
                     break
             if cd['ctors']:
                 self._run_ctor_on_heap(base, addr, cd['ctors'][0], ctor_args, line)
+            elif init_values:
+                # Aggregate init: positionally assign values to fields in declaration order
+                field_names = list(cd['fields'].keys())
+                for i, fv in enumerate(init_values):
+                    if i < len(field_names):
+                        self.memory.write_field(addr, field_names[i], fv, line)
 
         self.memory.update_line(line)
         self._emit(line, f"new {base} → {addr}.",
@@ -4001,6 +4019,36 @@ class CppInterpreter:
                     return result
         return []
 
+    def _extract_set_init_values(self, cursor) -> list:
+        """Recursively find INIT_LIST_EXPR in set/unordered_set initializer and return a flat list of values."""
+        c = cursor
+        while c is not None and c.kind in (CK.UNEXPOSED_EXPR, CK.PAREN_EXPR,
+                                            CK.CXX_FUNCTIONAL_CAST_EXPR):
+            ch = self._ch(c)
+            if not ch:
+                break
+            if c.kind == CK.UNEXPOSED_EXPR:
+                call_ch = [x for x in ch if x.kind == CK.CALL_EXPR]
+                if call_ch:
+                    c = call_ch[0]
+                    continue
+            c = ch[0]
+        if c is not None and c.kind == CK.CALL_EXPR:
+            for child in self._ch(c):
+                result = self._extract_set_init_values(child)
+                if result:
+                    return result
+        if c is not None and c.kind == CK.INIT_LIST_EXPR:
+            ch = self._ch(c)
+            # Flat value list (children are not inner INIT_LIST_EXPRs)
+            if ch and not all(x.kind == CK.INIT_LIST_EXPR for x in ch):
+                return [self._eval(e) for e in ch]
+            for child in ch:
+                result = self._extract_set_init_values(child)
+                if result:
+                    return result
+        return []
+
     def _call_vector_method(self, obj_name: str, obj_c,
                             method_name: str, args: list, line: int) -> dict:
         # Resolve array value (local var or this-field).
@@ -4300,13 +4348,14 @@ class CppInterpreter:
                 )
                 for k, v in sorted(data.items(), key=lambda x: _map_sort_key(x[0]))
             ]
-        elif isinstance(range_val, dict) and range_val.get('kind') == 'set':
-            # Set iteration — yield each key in sorted order
+        elif isinstance(range_val, dict) and range_val.get('kind') in ('set', 'multiset'):
+            # Set/multiset iteration — data is already sorted, yield each .val
             data = range_val.get('data', [])
             elements = [
-                _INT(int(k)) if isinstance(k, str) and k.lstrip('-').isdigit()
-                             else {'kind': 'char', 'value': k}
-                for k in sorted(data, key=lambda x: int(x) if isinstance(x, str) and x.lstrip('-').isdigit() else (0, x))
+                e['val'] if isinstance(e, dict) and 'val' in e
+                else (_INT(int(e)) if isinstance(e, str) and e.lstrip('-').isdigit()
+                      else {'kind': 'char', 'value': str(e)})
+                for e in data
             ]
         else:
             return
