@@ -629,7 +629,7 @@ class CppInterpreter:
                 and 'queue' not in type_spell and 'stack' not in type_spell):
             val = {'kind': 'struct', 'fields': {'first': _INT(0), 'second': _INT(0)}}
             if children:
-                non_tr = [c for c in children if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF)]
+                non_tr = [c for c in children if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
                 if non_tr:
                     init_val = self._eval(non_tr[0])
                     if isinstance(init_val, dict) and init_val.get('kind') == 'struct':
@@ -728,7 +728,7 @@ class CppInterpreter:
         if any(ct in type_spell for ct in ('map<', 'unordered_map<')):
             val = {'kind': 'map', 'data': {}, 'label': type_spell}
             # Populate from initializer {{k,v}, ...}
-            non_tr = [c for c in children if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF)]
+            non_tr = [c for c in children if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
             if non_tr:
                 pairs = self._extract_map_init_pairs(non_tr[0])
                 for kv, vv in pairs:
@@ -798,7 +798,7 @@ class CppInterpreter:
                     val = self._eval_new(new_c)
                 else:
                     non_tr = [c for c in children
-                              if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF)]
+                              if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
                     if non_tr:
                         val = self._eval(non_tr[0])
                         # NULL (defined as 0) → coerce to null pointer
@@ -822,7 +822,7 @@ class CppInterpreter:
 
         # ── primitive ──
         # Skip TYPE_REF/TEMPLATE_REF (appear when a typedef name is used, e.g. `const ll x = 5`)
-        non_tr = [c for c in children if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF)]
+        non_tr = [c for c in children if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
         if non_tr:
             val = self._eval(non_tr[0])
         else:
@@ -1058,7 +1058,7 @@ class CppInterpreter:
                     return self._eval_call(cursor)
             # Cast expressions with typedef: (ll)x has TYPE_REF[ll] as ch[0], value as ch[1]
             if k == CK.CSTYLE_CAST_EXPR and ch[0].kind == CK.TYPE_REF:
-                non_tr = [c for c in ch if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF)]
+                non_tr = [c for c in ch if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
                 return self._eval(non_tr[0]) if non_tr else _INT(0)
             return self._eval(ch[0])
 
@@ -1934,7 +1934,7 @@ class CppInterpreter:
         # ── class constructor call (fn is a class name) ────────────────────
         if fn in self.class_defs:
             args = [self._eval(c) for c in ch
-                    if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF)]
+                    if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
             # Copy construction: CALL_EXPR 'ClassName'(obj) where obj is already a
             # struct of the same class (e.g. `return C` → copy ctor call).
             # Return a deep copy instead of constructing a fresh zeroed object.
@@ -1945,7 +1945,7 @@ class CppInterpreter:
         # ── vector constructor (fn == 'vector' or type says vector) ────────
         if fn == 'vector' or self._is_vector_type(fn):
             type_spell = cursor.type.spelling or fn
-            real_ch = [c for c in ch if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF)]
+            real_ch = [c for c in ch if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
             return self._init_vector(type_spell, real_ch, line)
 
         # ── pair constructor: CALL_EXPR 'pair' where ALL children are args ─
@@ -1953,7 +1953,7 @@ class CppInterpreter:
         # callee slot — every child is a constructor argument.
         # Also handles pair copy-constructor: pair(pair_val) → return the pair.
         if fn == 'pair':
-            real_ch = [c for c in ch if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF)]
+            real_ch = [c for c in ch if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
             args = [self._eval(c) for c in real_ch]
             # Copy constructor: single arg that is already a pair/struct
             if len(args) == 1 and isinstance(args[0], dict) and args[0].get('kind') == 'struct':
@@ -1973,7 +1973,7 @@ class CppInterpreter:
 
         # ── string constructor: CALL_EXPR 'string' ─────────────────────────
         if fn == 'string':
-            real_ch = [c for c in ch if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF)]
+            real_ch = [c for c in ch if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
             # string(n, c) — fill constructor
             if len(real_ch) == 2:
                 n = self._to_int(self._eval(real_ch[0]))
@@ -2160,7 +2160,7 @@ class CppInterpreter:
             return self._init_vector(type_spell, ch, cursor.location.line)
 
         if 'pair' in type_spell:
-            real_ch = [c for c in ch if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF)]
+            real_ch = [c for c in ch if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
             if len(real_ch) >= 2:
                 return self._make_pair(self._eval(real_ch[0]), self._eval(real_ch[1]))
             return {'kind': 'struct', 'fields': {'first': _INT(0), 'second': _INT(0)}}
@@ -3942,7 +3942,7 @@ class CppInterpreter:
             m, init_val = n, 0
             if inner_vec is not None and inner_vec.kind == CK.CALL_EXPR and 'vector' in inner_vec.spelling:
                 ich = [c for c in self._ch(inner_vec)
-                       if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF)]
+                       if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
                 if ich:
                     m = self._to_int(self._eval(ich[0]))
                 if len(ich) > 1:
