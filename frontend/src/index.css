@@ -54,24 +54,3 @@ html, body, #root {
 .arrow-null {
   filter: drop-shadow(0 0 2px rgba(107, 114, 128, 0.3));
 }
-
-/* ── Print / PDF export ───────────────────────────────────────────────── */
-@media print {
-  @page { size: A4 landscape; margin: 10mm; }
-
-  /* Hide chrome */
-  [data-noprint],
-  header,
-  [data-tour="learn-button"] { display: none !important; }
-
-  /* Make layout fill the page */
-  html, body, #root { height: auto !important; overflow: visible !important; background: #09090b !important; }
-  .flex-col.h-screen { height: auto !important; overflow: visible !important; }
-
-  /* Expand panels so content isn't clipped */
-  .overflow-hidden { overflow: visible !important; }
-  .flex-1 { flex: 1 1 auto !important; }
-
-  /* Force dark background to print */
-  * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
-}

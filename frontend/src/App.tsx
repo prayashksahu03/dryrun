@@ -1,6 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import html2canvas from 'html2canvas';
-import jsPDF from 'jspdf';
 import { useExecutionStore } from './store/executionStore';
 import { useKeyboardNav } from './hooks/useKeyboardNav';
 import CodePanel from './components/CodePanel';
@@ -70,16 +68,6 @@ export default function App() {
   const [learnOpen, setLearnOpen] = useState(false);
   const isFirstVisit = !localStorage.getItem('dryrun_visited');
   const [tourStep, setTourStep] = useState<number | null>(isFirstVisit ? 0 : null);
-
-  const exportPDF = async () => {
-    const el = containerRef.current?.closest('.flex-col') as HTMLElement | null
-            ?? document.getElementById('root') as HTMLElement;
-    const canvas = await html2canvas(el, { backgroundColor: '#09090b', scale: 2, useCORS: true });
-    const img = canvas.toDataURL('image/png');
-    const pdf = new jsPDF({ orientation: 'landscape', unit: 'px', format: [canvas.width / 2, canvas.height / 2] });
-    pdf.addImage(img, 'PNG', 0, 0, canvas.width / 2, canvas.height / 2);
-    pdf.save('dryrun-trace.pdf');
-  };
 
   const startTour = () => setTourStep(0);
   const exitTour  = () => {
@@ -151,17 +139,9 @@ export default function App() {
             feedback
           </a>
           <button
-            onClick={exportPDF}
-            className="h-7 px-2.5 rounded text-[11px] font-mono text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-all border border-zinc-700/50 hover:border-zinc-600/70"
-            title="Export as PDF"
-          >
-            ↓ pdf
-          </button>
-          <button
             onClick={startTour}
             className="h-7 px-2.5 rounded text-[11px] font-mono text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-all border border-zinc-700/50 hover:border-zinc-600/70"
             title="App tour"
-            data-noprint
           >
             ? tour
           </button>
