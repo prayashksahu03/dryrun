@@ -49,7 +49,16 @@ export type CrashKind =
   | 'stack-overflow' | 'out-of-bounds' | 'segfault'
   | 'division-by-zero' | 'out_of_range' | 'invalid-argument' | 'assert';
 
-export type WarningKind = 'int-overflow';
+export type WarningKind =
+  | 'int-overflow'
+  | 'uninit-var'
+  | 'bitmask-precedence'
+  | 'missing-return'
+  | 'modify-during-iter'
+  | 'wrong-binary-search'
+  | 'queue-duplicate'
+  | 'pq-order-mismatch'
+  | 'iterator-invalidation';
 
 export interface TraceStep {
   index: number;

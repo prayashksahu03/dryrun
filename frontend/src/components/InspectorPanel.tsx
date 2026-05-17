@@ -29,7 +29,17 @@ function eventLabel(e: StepEvent): { label: string; color: string; rowBg?: strin
     };
     case 'warning': {
       const wkind: string = e.kind;
-      const WARNING_LABELS: Record<string, string> = { 'int-overflow': 'Integer Overflow' };
+      const WARNING_LABELS: Record<string, string> = {
+        'int-overflow':        'Integer Overflow',
+        'uninit-var':          'Uninitialized Variable',
+        'bitmask-precedence':  'Bitmask Precedence',
+        'missing-return':      'Missing Return',
+        'modify-during-iter':  'Modify During Iteration',
+        'wrong-binary-search': 'Binary Search Logic',
+        'queue-duplicate':     'Queue Duplicate (BFS)',
+        'pq-order-mismatch':   'PQ Order Mismatch',
+        'iterator-invalidation': 'Iterator Invalidation',
+      };
       return {
         label: `⚠ ${WARNING_LABELS[wkind] ?? wkind}`,
         color: 'text-amber-400',

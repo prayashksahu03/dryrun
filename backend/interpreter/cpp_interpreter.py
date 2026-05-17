@@ -318,6 +318,10 @@ class CppInterpreter:
         self._stdin_tokens: list = stdin_data.split() if stdin_data and stdin_data.strip() else []
         self._stdin_pos:    int  = 0
 
+        # Heuristic detection state
+        self._queue_push_log: dict = {}   # queue_name -> list of int values pushed (#7/#21)
+        self._iter_sources:   dict = {}   # iter_var_name -> container_name (#14)
+
     # ── Preprocessing ───────────────────────────────────────────────────────
 
     def _preprocess(self, source: str) -> tuple[str, int]:
@@ -645,6 +649,18 @@ class CppInterpreter:
             self.memory.update_line(line)
             self._emit(line, f"Declare {name} (priority_queue).",
                        {'type': 'assign', 'target': name, 'value': 'priority_queue'})
+            # PQ name vs ordering mismatch (#23 Wrong Priority Queue Ordering)
+            name_lower = name.lower()
+            wants_min = any(tok in name_lower for tok in ('min', 'small', 'shortest', 'dist', 'cost'))
+            wants_max = any(tok in name_lower for tok in ('max', 'large', 'biggest'))
+            if wants_min and not is_min:
+                self._warn(line, 'pq-order-mismatch',
+                           f"'{name}' sounds like a min-heap but uses default max-heap ordering. "
+                           f"Add greater<int> comparator or use priority_queue<int,vector<int>,greater<int>> (#23).")
+            elif wants_max and is_min:
+                self._warn(line, 'pq-order-mismatch',
+                           f"'{name}' sounds like a max-heap but was declared with greater<> (min-heap). "
+                           f"Remove the greater<> comparator (#23).")
             return
 
         # ── Fixed-size C array of vectors: vector<int> adj[6] ──
@@ -805,7 +821,17 @@ class CppInterpreter:
         # ── primitive ──
         # Skip TYPE_REF/TEMPLATE_REF (appear when a typedef name is used, e.g. `const ll x = 5`)
         non_tr = [c for c in children if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF)]
-        val = self._eval(non_tr[0]) if non_tr else self._default_for_type(type_spell)
+        if non_tr:
+            val = self._eval(non_tr[0])
+        else:
+            val = self._default_for_type(type_spell)
+            # Mark local scalar without explicit initializer as uninitialized (#17)
+            _prim_kw = ('int', 'long', 'short', 'bool', 'float', 'double')
+            if (isinstance(val, dict) and val.get('kind') == 'int'
+                    and len(self.memory.stack) > 0
+                    and any(p in type_spell.lower() for p in _prim_kw)
+                    and '*' not in type_spell and '[' not in type_spell):
+                val = {**val, '_uninit': True}
         self.memory.declare_var(name, val)
         self.memory.update_line(line)
         self._emit(line, f"Declare {name} = {self._fmt(val)}.",
@@ -847,6 +873,10 @@ class CppInterpreter:
         if init_c and not is_null(init_c):
             self._exec_stmt(init_c)
 
+        # Binary search loop detection: check if loop scope has lo/hi/mid vars (#11)
+        _BS_VARS = {'lo', 'hi', 'left', 'right', 'mid', 'l', 'r'}
+        _bs_warned = False
+
         iters = 0
         while True:
             if cond_c and not is_null(cond_c):
@@ -858,6 +888,15 @@ class CppInterpreter:
                     f'⚠ Infinite loop detected: this for-loop ran {iters} times without terminating. '
                     'Check your loop condition.'
                 )
+            # Warn if binary search loop runs suspiciously many times (#11)
+            if not _bs_warned and iters == 200:
+                frame_vars = set(self.memory.stack[-1]['variables'].keys()) if self.memory.stack else set()
+                if _BS_VARS & frame_vars and 'mid' in frame_vars:
+                    self._warn(line, 'wrong-binary-search',
+                               f"Loop with binary search variables (lo/hi/mid) has run {iters} iterations. "
+                               f"Binary search should finish in O(log n) ≈ 30 steps — "
+                               f"check that mid is updated correctly and the range shrinks each iteration (#11).")
+                    _bs_warned = True
             try:
                 if body_c and not is_null(body_c):
                     self._exec_stmt(body_c)
@@ -1114,7 +1153,19 @@ class CppInterpreter:
         if name == 'LLONG_MAX':          return _INT(9223372036854775807)
         if name == 'LLONG_MIN':          return _INT(-9223372036854775808)
         try:
-            return self.memory.get_var(name)
+            val = self.memory.get_var(name)
+            # Uninitialized variable read (#17)
+            if isinstance(val, dict) and val.get('_uninit'):
+                self._warn(cursor.location.line, 'uninit-var',
+                           f"Variable '{name}' is read before being initialized. "
+                           f"Its value is undefined — initialize it before use.")
+                # Clear flag so we warn only on the first read
+                val = {k: v for k, v in val.items() if k != '_uninit'}
+                for frame in reversed(self.memory.stack):
+                    if name in frame['variables']:
+                        frame['variables'][name] = val
+                        break
+            return val
         except RuntimeError:
             # Might be a this-field accessed without explicit this->
             if self._this_stack:
@@ -1196,6 +1247,23 @@ class CppInterpreter:
                     self._emit(line, f"Output: {_disp or '(newline)'}",
                                {'type': 'output', 'text': text})
                 return _INT(0)
+
+        # Bitmask operator precedence check (#30): a & b == 0 parses as a & (b==0)
+        if op in ('&', '|', '^'):
+            for child in ch:
+                inner = child
+                # Unwrap one level of implicit cast if present
+                if inner.kind in (CK.IMPLICIT_CAST_EXPR, CK.CSTYLE_CAST_EXPR):
+                    inner_ch = self._ch(inner)
+                    if inner_ch: inner = inner_ch[0]
+                if inner.kind == CK.BINARY_OPERATOR and child.kind != CK.PAREN_EXPR:
+                    cmp_op = self._get_binary_op(inner)
+                    if cmp_op in ('==', '!=', '<', '>', '<=', '>='):
+                        self._warn(cursor.location.line, 'bitmask-precedence',
+                                   f"Operator precedence: '{op}' binds looser than '{cmp_op}'. "
+                                   f"'{op}' is applied LAST here. Did you mean ({{}}{op}{{}}) {cmp_op} {{}}? "
+                                   f"Add parentheses to make intent explicit.")
+                        break
 
         l = self._eval(ch[0])
         r = self._eval(ch[1])
@@ -1525,8 +1593,18 @@ class CppInterpreter:
                 if 0 <= idx < declared_bound:
                     # Within declared bounds but beyond cap — return zero default
                     return _INT(0)
-                self._crash(line, 'out-of-bounds',
-                            f"Index {idx} out of bounds for array of size {declared_bound}")
+                # Improve message: off-by-one (#12) and graph indexing (#16)
+                arr_name = getattr(arr_c, 'spelling', '') or ''
+                _GRAPH_NAMES = {'adj', 'graph', 'g', 'edges', 'nb', 'neighbors', 'edge', 'node', 'to'}
+                if idx == declared_bound:
+                    msg = (f"Index {idx} out of bounds for array of size {declared_bound} "
+                           f"— off-by-one error? Check whether loop uses '<' vs '<=' (#12)")
+                elif any(n in arr_name.lower() for n in _GRAPH_NAMES):
+                    msg = (f"Index {idx} out of bounds for array of size {declared_bound} "
+                           f"on '{arr_name}' — wrong graph node index? Nodes must be in [0, n) (#16)")
+                else:
+                    msg = f"Index {idx} out of bounds for array of size {declared_bound}"
+                self._crash(line, 'out-of-bounds', msg)
             cell = vals[idx]
             if isinstance(cell, list):
                 return {'kind': 'array', 'values': cell}
@@ -3548,6 +3626,18 @@ class CppInterpreter:
         except ReturnException as r:
             ret_val = r.value
 
+        # Missing return in non-void function (#34)
+        if ret_val is None:
+            try:
+                ret_type = fn_cursor.result_type.spelling if fn_cursor.result_type else ''
+                if ret_type and 'void' not in ret_type and ret_type not in ('', 'auto'):
+                    self._warn(line, 'missing-return',
+                               f"Function '{fn_name}' has return type '{ret_type}' but no return "
+                               f"statement was reached — returning 0 by default. "
+                               f"Check all code paths have an explicit return.")
+            except Exception:
+                pass
+
         self._apply_ref_writeback(ref_wb)
         self.memory.pop_frame()
         self._emit(line, f"Returning from {fn_name}().",
@@ -4223,6 +4313,10 @@ class CppInterpreter:
         is_ref = ('&' in (loop_var_c.type.spelling if loop_var_c and loop_var_c.type else ''))
         range_name = self._cursor_name(range_c) if is_ref and not binding_vars else None
 
+        # Track initial container size for modify-during-iteration check (#15)
+        range_container_name = self._cursor_name(range_c) if range_c else None
+        initial_container_size = len(elements)
+
         iters = 0
         for i, elem in enumerate(elements):
             if iters >= MAX_ITERS:
@@ -4246,6 +4340,20 @@ class CppInterpreter:
                 break
             except ContinueException:
                 pass
+            # Modifying container during iteration check (#15)
+            if range_container_name:
+                try:
+                    cur_val = self.memory.get_var(range_container_name)
+                    if isinstance(cur_val, dict) and cur_val.get('kind') == 'array':
+                        cur_size = len(cur_val.get('values', []))
+                        if cur_size != initial_container_size:
+                            self._warn(line, 'modify-during-iter',
+                                       f"Container '{range_container_name}' changed size from "
+                                       f"{initial_container_size} to {cur_size} during range-for iteration. "
+                                       f"Modifying a container while iterating it is undefined behavior (#15).")
+                            initial_container_size = cur_size
+                except RuntimeError:
+                    pass
             # Write-back for auto& (reference binding)
             if is_ref and loop_var_name and range_name:
                 try:
@@ -4310,6 +4418,17 @@ class CppInterpreter:
             self.memory.update_line(line)
             self._emit(line, f"{real_name}.push({self._fmt(val)}).",
                        {'type': 'assign', 'target': real_name, 'value': self._fmt(val)})
+            # Queue duplicate detection (#7/#21 Wrong BFS Visited Timing / Missing Visited Array)
+            if col.get('ctype') in ('queue', ''):
+                pushed_int = self._to_int(val)
+                if real_name not in self._queue_push_log:
+                    self._queue_push_log[real_name] = {}
+                log = self._queue_push_log[real_name]
+                log[pushed_int] = log.get(pushed_int, 0) + 1
+                if log[pushed_int] == 3:
+                    self._warn(line, 'queue-duplicate',
+                               f"Value {pushed_int} pushed to '{real_name}' 3+ times. "
+                               f"Likely missing visited[] array in BFS — nodes revisited (#7/#21).")
             return _INT(0)
 
         if method_name == 'front':
@@ -4374,6 +4493,11 @@ class CppInterpreter:
             self.memory.update_line(line)
             self._emit(line, f"{real_name}.push_back({self._fmt(stored)}).",
                        {'type': 'assign', 'target': real_name, 'value': self._fmt(stored)})
+            # Iterator invalidation (#14): warn if any iterator for this vector is in scope
+            if real_name in self._iter_sources:
+                self._warn(line, 'iterator-invalidation',
+                           f"push_back on '{real_name}' may invalidate all iterators/pointers "
+                           f"to it (#14). Active iterator '{self._iter_sources[real_name]}' is now dangling.")
             return _INT(0)
 
         if method_name == 'push_front':
