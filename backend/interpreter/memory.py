@@ -178,10 +178,25 @@ class Memory:
         return block
 
     def read_field(self, addr, field: str, line: int):
+        # Stack-allocated struct pointer (&local_var)
+        if addr in self._addr_var:
+            depth, name = self._addr_var[addr]
+            if depth < len(self.stack) and name in self.stack[depth]['variables']:
+                obj = self.stack[depth]['variables'][name]
+                if isinstance(obj, dict) and obj.get('kind') == 'struct':
+                    return copy.deepcopy(obj['fields'].get(field, {'kind': 'int', 'value': 0}))
         block = self.read_ptr(addr, line)
         return copy.deepcopy(block['fields'].get(field, {'kind': 'int', 'value': 0}))
 
     def write_field(self, addr, field: str, value, line: int):
+        # Stack-allocated struct pointer (&local_var)
+        if addr in self._addr_var:
+            depth, name = self._addr_var[addr]
+            if depth < len(self.stack) and name in self.stack[depth]['variables']:
+                obj = self.stack[depth]['variables'][name]
+                if isinstance(obj, dict) and obj.get('kind') == 'struct':
+                    obj['fields'][field] = value
+                    return
         block = self.read_ptr(addr, line)
         block['fields'][field] = value
 

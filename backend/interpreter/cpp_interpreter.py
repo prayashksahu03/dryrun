@@ -28,7 +28,7 @@ except ImportError:
     TK = None
 
 from .memory import Memory, _reset_addr
-from .errors import ReturnException, BreakException, ContinueException, SegFaultError
+from .errors import ReturnException, BreakException, ContinueException, SegFaultError, ThrownException
 
 MAX_STEPS     = 2000
 MAX_ITERS     = 120   # iterations before we warn about an infinite loop
@@ -220,6 +220,7 @@ namespace std {
     bool operator<(string const&) const; bool operator>(string const&) const;
     bool operator<=(string const&) const; bool operator>=(string const&) const;
     iterator begin(); iterator end();
+    static const int npos = -1;
   };
   int stoi(string const&);
   string to_string(int); string to_string(long long);
@@ -228,6 +229,19 @@ namespace std {
   int toupper(int); int tolower(int);
   template<typename T> T gcd(T a, T b);
   template<typename T> T lcm(T a, T b);
+  struct _Setw { int n; };
+  struct _Setfill { char c; };
+  struct _Setprecision { int n; };
+  _Setw setw(int n);
+  _Setfill setfill(char c);
+  _Setprecision setprecision(int n);
+  ostream& operator<<(ostream&, _Setw);
+  ostream& operator<<(ostream&, _Setfill);
+  ostream& operator<<(ostream&, _Setprecision);
+  ostream& hex(ostream&);
+  ostream& dec(ostream&);
+  ostream& fixed(ostream&);
+  ostream& scientific(ostream&);
   template<typename It, typename T> void fill(It first, It last, T const& val);
   template<typename It, typename T> void iota(It first, It last, T val);
   template<typename It, typename T> int count(It first, It last, T const& val);
@@ -279,6 +293,27 @@ int __builtin_popcount(unsigned int x);
 int __builtin_clz(unsigned int x);
 int __builtin_ctz(unsigned int x);
 int __gcd(int a, int b);
+double sqrt(double x);
+double floor(double x);
+double ceil(double x);
+double round(double x);
+double fabs(double x);
+double pow(double x, double y);
+double log(double x);
+double log2(double x);
+double log10(double x);
+double exp(double x);
+double sin(double x);
+double cos(double x);
+double tan(double x);
+double asin(double x);
+double acos(double x);
+double atan(double x);
+double atan2(double y, double x);
+double fmod(double x, double y);
+int rand();
+void srand(unsigned int seed);
+int time(int* t);
 """
 _STUBS_LINES = _STUBS.count('\n')   # stubs end with \n; body starts on the next line
 
@@ -304,8 +339,9 @@ class CppInterpreter:
         self.source_bytes  = source.encode('utf-8')
         self.source_lines  = source.split('\n')
 
-        self.func_defs:  dict = {}   # name  -> cursor
-        self.class_defs: dict = {}   # name  -> { fields, ctors, methods }
+        self.func_defs:    dict = {}   # name  -> cursor
+        self.class_defs:   dict = {}   # name  -> { fields, ctors, methods }
+        self.enum_constants: dict = {} # EAST/NORTH/etc -> int value
         self._global_var_cursors: list = []   # global VAR_DECL cursors
         self._lambda_store: dict = {}          # variable name -> LAMBDA_EXPR cursor
 
@@ -323,6 +359,13 @@ class CppInterpreter:
         self._iter_sources:   dict = {}   # iter_var_name -> container_name (#14)
         self._vec_buf_addrs:  dict = {}   # var_name -> current fake buffer addr
         self._vec_iter_vars:  dict = {}   # range_name -> synthetic iter var name in frame
+        self._static_vars:    dict = {}   # (func_name, var_name) -> persistent value
+        self._static_frame_keys: dict = {} # func_name -> {var_name, ...}
+        self._output_width: int   = 0    # setw(n) state
+        self._output_fill:  str   = ' '  # setfill(c) state
+        self._output_hex:   bool  = False # hex/dec manipulator state
+        self._output_precision: int = -1  # setprecision(n): -1 = default
+        self._output_fixed: bool  = False # fixed/scientific mode
 
     # ── Preprocessing ───────────────────────────────────────────────────────
 
@@ -429,6 +472,11 @@ class CppInterpreter:
             pass
 
         if not crashed:
+            # Call destructors for main's local variables
+            try:
+                self._call_frame_destructors(-1)
+            except Exception:
+                pass
             leaks = [a for a, b in self.memory.heap.items() if b['state'] == 'allocated']
             desc  = ("Program ends cleanly. No memory leaks."
                      if not leaks
@@ -516,25 +564,60 @@ class CppInterpreter:
                         if typedef_name and typedef_name not in self.class_defs and struct_name in self.class_defs:
                             self.class_defs[typedef_name] = self.class_defs[struct_name]
                         break
+            elif k == CK.CLASS_TEMPLATE and child.is_definition():
+                if child.location.line > self._line_offset:
+                    self._collect_class(child)
+            elif k == CK.FUNCTION_TEMPLATE and child.is_definition():
+                if child.location.line > self._line_offset:
+                    self.func_defs[child.spelling] = child
+            elif k == CK.ENUM_DECL and child.location.line > self._line_offset:
+                self._collect_enum(child)
             elif k == CK.VAR_DECL and child.location.line > self._line_offset:
                 self._global_var_cursors.append(child)
+            elif (k in (CK.CONSTRUCTOR, CK.CXX_METHOD, CK.DESTRUCTOR)
+                  and child.is_definition() and child.location.line > self._line_offset):
+                # Out-of-class method definitions (e.g. template<T> MyClass<T>::method() {...})
+                sp = child.semantic_parent
+                cls_name = sp.spelling if sp else ''
+                if cls_name and cls_name in self.class_defs:
+                    if k == CK.CONSTRUCTOR:
+                        self.class_defs[cls_name]['ctors'].append(child)
+                    elif k == CK.DESTRUCTOR:
+                        self.class_defs[cls_name]['methods']['~' + cls_name] = child
+                    else:
+                        self.class_defs[cls_name]['methods'][child.spelling] = child
 
     def _collect_class(self, cursor):
         name = cursor.spelling
         if not name:
             return
-        cd: dict = {'fields': {}, 'ctors': [], 'methods': {}}
+        cd: dict = {'fields': {}, 'ctors': [], 'methods': {}, 'bases': []}
         for child in self._ch(cursor):
             ck = child.kind
-            if ck == CK.FIELD_DECL:
+            if ck == CK.CXX_BASE_SPECIFIER:
+                base_name = child.spelling.replace('class ', '').replace('struct ', '').strip()
+                if base_name:
+                    cd['bases'].append(base_name)
+            elif ck == CK.FIELD_DECL:
                 cd['fields'][child.spelling] = child.type.spelling
             elif ck == CK.CONSTRUCTOR and child.is_definition():
                 cd['ctors'].append(child)
+            elif ck == CK.DESTRUCTOR and child.is_definition():
+                cd['methods']['~' + name] = child
             elif ck == CK.CXX_METHOD and child.is_definition():
                 cd['methods'][child.spelling] = child
             elif ck in (CK.CLASS_DECL, CK.STRUCT_DECL) and child.is_definition():
                 self._collect_class(child)
         self.class_defs[name] = cd
+
+    def _collect_enum(self, cursor):
+        """Register enum constants so DECL_REF_EXPR can resolve them."""
+        enum_name = cursor.spelling  # empty for anonymous enums
+        for child in self._ch(cursor):
+            if child.kind == CK.ENUM_CONSTANT_DECL:
+                self.enum_constants[child.spelling] = child.enum_value
+                if enum_name:
+                    self.enum_constants[f'{enum_name}::{child.spelling}'] = child.enum_value
 
     # ── Statement execution ─────────────────────────────────────────────────
 
@@ -543,6 +626,48 @@ class CppInterpreter:
             return
         for child in self._ch(cursor):
             self._exec_stmt(child)
+
+    def _exec_scoped_compound(self, cursor):
+        """Execute a nested block statement, calling destructors for block-local
+        variables when the block exits (even via break/continue/return)."""
+        if not self.memory.stack:
+            self._exec_compound(cursor)
+            return
+        frame = self.memory.stack[-1]
+        before_vars = set(frame['variables'].keys())
+        exc = None
+        try:
+            self._exec_compound(cursor)
+        except (ReturnException, BreakException, ContinueException) as e:
+            exc = e
+        finally:
+            new_vars = [v for v in frame['variables'] if v not in before_vars]
+            if new_vars:
+                self._call_named_destructors(new_vars, cursor.location.line)
+        if exc is not None:
+            raise exc
+
+    def _call_named_destructors(self, var_names: list, line: int):
+        """Call destructors for named local variables in reverse declaration order.
+        Only removes struct/class variables that have a destructor (to prevent
+        double-firing at function exit). Non-struct variables stay in the frame."""
+        if not self.memory.stack:
+            return
+        frame = self.memory.stack[-1]
+        for var_name in reversed(var_names):
+            val = frame['variables'].get(var_name)
+            if isinstance(val, dict) and val.get('kind') == 'struct':
+                class_name = val.get('class', '')
+                if class_name and class_name in self.class_defs:
+                    dtor_name = '~' + class_name
+                    cd = self.class_defs[class_name]
+                    if dtor_name in cd.get('methods', {}):
+                        try:
+                            self._call_method_on_stack(class_name, var_name, None, dtor_name, [], line)
+                        except Exception:
+                            pass
+                        # Remove from frame so frame-exit destructor doesn't double-fire
+                        frame['variables'].pop(var_name, None)
 
     def _exec_stmt(self, cursor):
         if cursor is None:
@@ -554,10 +679,12 @@ class CppInterpreter:
                     self._exec_decl(c)
                 elif c.kind == CK.UNEXPOSED_DECL:
                     self._exec_structured_binding(c)
+                elif c.kind == CK.ENUM_DECL:
+                    self._collect_enum(c)
         elif k == CK.VAR_DECL:
             self._exec_decl(cursor)
         elif k == CK.COMPOUND_STMT:
-            self._exec_compound(cursor)
+            self._exec_scoped_compound(cursor)
         elif k == CK.IF_STMT:
             self._exec_if(cursor)
         elif k == CK.FOR_STMT:
@@ -580,10 +707,20 @@ class CppInterpreter:
             raise ContinueException()
         elif k == CK.NULL_STMT:
             pass
+        elif k == CK.CASE_STMT:
+            case_ch = self._ch(cursor)
+            if len(case_ch) > 1:
+                self._exec_stmt(case_ch[1])
         elif k == CK.LABEL_STMT:
             ch = self._ch(cursor)
             if ch:
                 self._exec_stmt(ch[0])
+        elif k == CK.CXX_TRY_STMT:
+            self._exec_try(cursor)
+        elif k == CK.CXX_THROW_EXPR:
+            ch = self._ch(cursor)
+            thrown_val = self._eval(ch[0]) if ch else _INT(0)
+            raise ThrownException(thrown_val)
         else:
             self._eval(cursor)
 
@@ -593,6 +730,31 @@ class CppInterpreter:
         line       = cursor.location.line
         name       = cursor.spelling
         type_spell = cursor.type.spelling
+
+        # ── static local variable — value persists across calls ──
+        try:
+            import clang.cindex as _ci
+            if cursor.storage_class == _ci.StorageClass.STATIC:
+                func_name = self.memory.stack[-1]['function'] if self.memory.stack else '__global__'
+                skey = (func_name, name)
+                if skey in self._static_vars:
+                    # Already initialized on a prior call — use persisted value
+                    val = self._static_vars[skey]
+                else:
+                    # First call — evaluate init, save persistently
+                    ch = self._ch(cursor)
+                    non_tr = [c for c in ch if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
+                    val = self._eval(non_tr[0]) if non_tr else _INT(0)
+                    self._static_vars[skey] = val
+                # Track which vars in this function are static so we can save on exit
+                self._static_frame_keys.setdefault(func_name, set()).add(name)
+                self.memory.declare_var(name, val)
+                self.memory.update_line(line)
+                self._emit(line, f"Declare static {name} = {self._fmt(val)}.",
+                           {'type': 'assign', 'target': name, 'value': self._fmt(val)})
+                return
+        except Exception:
+            pass
         # Resolve type aliases: 'pii' → 'std::pair<int,int>', 'vi' → 'std::vector<int,...>'
         try:
             canon = cursor.type.get_canonical().spelling
@@ -602,6 +764,18 @@ class CppInterpreter:
             pass
         children   = self._ch(cursor)
 
+        # ── lvalue reference variable: int& r = a ──
+        if '&' in type_spell and '&&' not in type_spell and '*' not in type_spell:
+            non_tr = [c for c in children if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
+            if non_tr and non_tr[0].kind == CK.DECL_REF_EXPR:
+                target_name = non_tr[0].spelling
+                ref_val = {'kind': 'ref', 'target': target_name}
+                self.memory.declare_var(name, ref_val)
+                self.memory.update_line(line)
+                self._emit(line, f"Declare {name} = ref({target_name}).",
+                           {'type': 'assign', 'target': name, 'value': f'ref({target_name})'})
+                return
+
         # ── auto — infer type from initialiser ──
         # Also catch iterator types (e.g. std::vector<int>::iterator) which libclang
         # resolves for auto variables in template contexts.
@@ -609,7 +783,10 @@ class CppInterpreter:
                             or type_spell == 'iterator')
         is_lambda_type   = type_spell.startswith('(lambda at')
         if type_spell.startswith('auto') or type_spell == 'auto' or is_iterator_type or is_lambda_type:
-            init_c = children[0] if children else None
+            # Skip type reference nodes (TYPE_REF, TEMPLATE_REF) to find the actual initializer
+            _non_type_ch = [c for c in children
+                            if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
+            init_c = _non_type_ch[0] if _non_type_ch else (children[0] if children else None)
             uw = self._unwrap(init_c) or init_c if init_c else None
             if uw and uw.kind == CK.LAMBDA_EXPR:
                 # Store the lambda cursor for later invocation by name
@@ -787,6 +964,26 @@ class CppInterpreter:
                        {'type': 'assign', 'target': name, 'value': 'set'})
             return
 
+        # ── C-style array of structs: Student students[3] = {{...},{...}} ──
+        if '[' in type_spell and self._is_class_type(type_spell):
+            base_t = self._base_type(type_spell)
+            dims_t = [int(d) for d in re.findall(r'\[(\d+)\]', type_spell)]
+            n_t = dims_t[0] if dims_t else 0
+            structs = []
+            init_c_t = next((c for c in children if c.kind == CK.INIT_LIST_EXPR), None)
+            if init_c_t:
+                for i_t, elem_c in enumerate(self._ch(init_c_t)):
+                    if i_t >= n_t: break
+                    structs.append(self._init_class_on_stack(base_t, [elem_c], line))
+            while len(structs) < n_t:
+                structs.append(self._init_class_on_stack(base_t, [], line))
+            val = {'kind': 'array', 'values': structs, 'declared_size': n_t}
+            self.memory.declare_var(name, val)
+            self.memory.update_line(line)
+            self._emit(line, f"Declare {name}[{n_t}] (struct array).",
+                       {'type': 'assign', 'target': name, 'value': f'[{n_t}]'})
+            return
+
         # ── C-style array ──
         if '[' in type_spell and not self._is_class_type(type_spell):
             val = self._init_c_array(cursor, children)
@@ -806,12 +1003,17 @@ class CppInterpreter:
                     val = self._eval_new(new_c)
                 else:
                     non_tr = [c for c in children
-                              if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
+                              if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF,
+                                                CK.PARM_DECL)]
                     if non_tr:
                         val = self._eval(non_tr[0])
                         # NULL (defined as 0) → coerce to null pointer
                         if isinstance(val, dict) and val.get('kind') == 'int' and val.get('value') == 0:
                             val = {'kind': 'pointer', 'address': None}
+                        # Array-to-pointer decay: int* p = arr → track as array_ptr
+                        elif isinstance(val, dict) and val.get('kind') == 'array':
+                            arr_name = non_tr[0].spelling or self._cursor_name(non_tr[0])
+                            val = {'kind': 'array_ptr', 'name': arr_name, 'idx': 0}
             self.memory.declare_var(name, val)
             self.memory.update_line(line)
             self._emit(line, f"Declare {name} = {self._fmt(val)}.",
@@ -831,8 +1033,12 @@ class CppInterpreter:
         # ── primitive ──
         # Skip TYPE_REF/TEMPLATE_REF (appear when a typedef name is used, e.g. `const ll x = 5`)
         non_tr = [c for c in children if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
+        _is_fp_type = any(t in type_spell for t in ('float', 'double'))
         if non_tr:
             val = self._eval(non_tr[0])
+            # Coerce int→float when the declared type is float/double
+            if _is_fp_type and isinstance(val, dict) and val.get('kind') == 'int':
+                val = _FLOAT(float(val.get('value', 0)))
         else:
             val = self._default_for_type(type_spell)
             # Mark local scalar without explicit initializer as uninitialized (#17)
@@ -880,7 +1086,23 @@ class CppInterpreter:
         elif len(ch) == 1: body_c = ch[0]; init_c = cond_c = incr_c = None
         else: return
 
+        # Execute init in a new scope: save any existing vars that the init might
+        # shadow (e.g. `for(int g=...; ...)` where `g` is already a parameter).
+        # Restore them after the loop so the outer scope is unaffected.
+        _shadowed = {}
         if init_c and not is_null(init_c):
+            if self.memory.stack:
+                _frame = self.memory.stack[-1]
+                # Find var names declared by the init statement
+                _init_names = set()
+                if init_c.kind == CK.DECL_STMT:
+                    for _ic in self._ch(init_c):
+                        if _ic.kind == CK.VAR_DECL and _ic.spelling:
+                            _init_names.add(_ic.spelling)
+                # Save existing values for vars about to be shadowed
+                for _n in _init_names:
+                    if _n in _frame['variables']:
+                        _shadowed[_n] = _frame['variables'][_n]
             self._exec_stmt(init_c)
 
         # Binary search loop detection: check if loop scope has lo/hi/mid vars (#11)
@@ -916,6 +1138,12 @@ class CppInterpreter:
                 pass
             if incr_c and not is_null(incr_c):
                 self._eval(incr_c)
+
+        # Restore shadowed variables (for-init scope ends here)
+        if _shadowed and self.memory.stack:
+            _frame = self.memory.stack[-1]
+            for _n, _v in _shadowed.items():
+                _frame['variables'][_n] = _v
 
     def _exec_while(self, cursor):
         line = cursor.location.line
@@ -962,6 +1190,35 @@ class CppInterpreter:
                 )
             if not self._truthy(self._eval(cond_c)):
                 break
+
+    def _exec_try(self, cursor):
+        """Execute try-catch block. CXX_TRY_STMT: [COMPOUND_STMT(try), CXX_CATCH_STMT...]"""
+        ch = self._ch(cursor)
+        if not ch:
+            return
+        try_body = ch[0]
+        catch_clauses = [c for c in ch[1:] if c.kind == CK.CXX_CATCH_STMT]
+        try:
+            self._exec_compound(try_body)
+        except ThrownException as exc:
+            # Find first matching catch clause (we match any for simplicity)
+            for clause in catch_clauses:
+                clause_ch = self._ch(clause)
+                # First child may be VAR_DECL for the caught variable
+                var_decl = clause_ch[0] if clause_ch and clause_ch[0].kind == CK.VAR_DECL else None
+                catch_body = next((c for c in clause_ch if c.kind == CK.COMPOUND_STMT), None)
+                if var_decl and catch_body:
+                    self.memory.stack[-1]['variables'][var_decl.spelling] = exc.value
+                elif catch_body is None and clause_ch:
+                    catch_body = clause_ch[-1]
+                if catch_body:
+                    try:
+                        self._exec_compound(catch_body)
+                    except ReturnException:
+                        raise
+                    except BreakException:
+                        raise
+                break  # only first matching clause
 
     def _exec_switch(self, cursor):
         children = self._ch(cursor)
@@ -1064,11 +1321,29 @@ class CppInterpreter:
                 # Reuse _eval_call since it reads children via _ch() the same way.
                 if callee_c.kind == CK.MEMBER_REF_EXPR:
                     return self._eval_call(cursor)
-            # Cast expressions with typedef: (ll)x has TYPE_REF[ll] as ch[0], value as ch[1]
-            if k == CK.CSTYLE_CAST_EXPR and ch[0].kind == CK.TYPE_REF:
+            # Cast expressions: (ll)x or string("foo") — skip TYPE_REF/TEMPLATE_REF wrapper
+            if k in (CK.CSTYLE_CAST_EXPR, CK.CXX_FUNCTIONAL_CAST_EXPR) and ch[0].kind in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF):
                 non_tr = [c for c in ch if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
-                return self._eval(non_tr[0]) if non_tr else _INT(0)
-            return self._eval(ch[0])
+                val = self._eval(non_tr[0]) if non_tr else _INT(0)
+            else:
+                val = self._eval(ch[0])
+            # Apply type conversion for explicit casts
+            if k in (CK.CSTYLE_CAST_EXPR, CK.CXX_STATIC_CAST_EXPR, CK.CXX_FUNCTIONAL_CAST_EXPR):
+                tgt = cursor.type.spelling if cursor.type else ''
+                if any(t in tgt for t in ('float', 'double')):
+                    if isinstance(val, dict) and val.get('kind') == 'int':
+                        return _FLOAT(float(val.get('value', 0)))
+                elif tgt in ('int', 'unsigned int', 'long', 'short', 'unsigned', 'unsigned long',
+                             'long long', 'unsigned long long'):
+                    if _is_float_val(val):
+                        return _INT(int(val.get('value', 0)))
+                    if isinstance(val, dict) and val.get('kind') == 'char':
+                        v = val.get('value', '')
+                        return _INT(ord(v[0]) if v else 0)
+                elif tgt == 'char':
+                    n = self._to_int(val)
+                    return {'kind': 'char', 'value': chr(int(n) & 0xFF)}
+            return val
 
         if k == CK.INTEGER_LITERAL:         return self._eval_int_lit(cursor)
         if k == CK.FLOATING_LITERAL:        return self._eval_float_lit(cursor)
@@ -1110,6 +1385,10 @@ class CppInterpreter:
     def _eval_int_lit(self, cursor) -> dict:
         for tok in cursor.get_tokens():
             s = tok.spelling.rstrip('uUlL')
+            # C-style octal (032) → Python-style octal (0o32)
+            if (len(s) > 1 and s[0] == '0'
+                    and s[1:2] not in ('x', 'X', 'o', 'O', 'b', 'B')):
+                s = '0o' + s[1:]
             try:
                 return _INT(int(s, 0))
             except ValueError:
@@ -1120,10 +1399,10 @@ class CppInterpreter:
         for tok in cursor.get_tokens():
             s = tok.spelling.rstrip('fFdD')
             try:
-                return _INT(int(float(s)))
+                return _FLOAT(float(s))
             except ValueError:
                 pass
-        return _INT(0)
+        return _FLOAT(0.0)
 
     def _eval_char_lit(self, cursor) -> dict:
         for tok in cursor.get_tokens():
@@ -1162,8 +1441,15 @@ class CppInterpreter:
         if name == 'INT_MIN':            return _INT(-2147483648)
         if name == 'LLONG_MAX':          return _INT(9223372036854775807)
         if name == 'LLONG_MIN':          return _INT(-9223372036854775808)
+        if name == 'npos':               return _INT(-1)  # string::npos
         try:
             val = self.memory.get_var(name)
+            # Dereference reference variables
+            if isinstance(val, dict) and val.get('kind') == 'ref':
+                try:
+                    val = self.memory.get_var(val['target'])
+                except RuntimeError:
+                    pass
             # Uninitialized variable read (#17)
             if isinstance(val, dict) and val.get('_uninit'):
                 self._warn(cursor.location.line, 'uninit-var',
@@ -1182,11 +1468,17 @@ class CppInterpreter:
                 val = self._read_this_field(name, cursor.location.line)
                 if val is not None:
                     return val
+            # Fall back to enum constants (unscoped enums resolve as DECL_REF_EXPR)
+            if name in self.enum_constants:
+                return _INT(self.enum_constants[name])
+            # Function pointer: name refers to a user-defined function
+            if name in self.func_defs:
+                return {'kind': 'funcptr', 'name': name}
             return _INT(0)
 
     def _eval_member_ref(self, cursor) -> dict:
         """obj.field  or  ptr->field  or  this->field"""
-        field = cursor.spelling
+        field = cursor.spelling or self._member_field_name(cursor)
         ch    = self._ch(cursor)
 
         if not ch:
@@ -1249,10 +1541,37 @@ class CppInterpreter:
                 return False
             if _is_cout_bin(ch[0]):
                 self._eval(ch[0])  # recurse — output left chain
-                r_val = self._eval(ch[1])
                 line  = cursor.location.line
+                # Check for endl/hex/dec manipulators by token spelling
+                rhs_sp = ch[1].spelling if ch[1] else ''
+                if rhs_sp in ('endl', 'std::endl', 'ends', '\n'):
+                    self._emit(line, 'Output: newline', {'type': 'output', 'text': '\n'})
+                    return _INT(0)
+                if rhs_sp in ('hex', 'std::hex'):
+                    self._output_hex = True; return _INT(0)
+                if rhs_sp in ('dec', 'std::dec'):
+                    self._output_hex = False; return _INT(0)
+                if rhs_sp in ('fixed', 'std::fixed'):
+                    self._output_fixed = True; return _INT(0)
+                if rhs_sp in ('scientific', 'std::scientific'):
+                    self._output_fixed = True; return _INT(0)
+                r_val = self._eval(ch[1])
+                # Manip value (setw/setfill returned from function call)
+                if isinstance(r_val, dict) and r_val.get('kind') == 'manip':
+                    mt = r_val.get('mtype')
+                    if mt == 'setw':         self._output_width = r_val.get('value', 0)
+                    elif mt == 'setfill':    self._output_fill = r_val.get('value', ' ')
+                    elif mt == 'setprecision': self._output_precision = r_val.get('value', -1)
+                    elif mt == 'fixed':      self._output_fixed = True
+                    elif mt == 'scientific': self._output_fixed = True
+                    return _INT(0)
                 text  = self._val_to_output_text(r_val)
-                if text or text == '0':
+                if text is not None and (text or text == '0'):
+                    if self._output_hex and isinstance(r_val, dict) and r_val.get('kind') == 'int':
+                        text = hex(r_val.get('value', 0))[2:]  # strip '0x' prefix like C++ cout<<hex
+                    w = self._output_width; self._output_width = 0
+                    if w > len(text):
+                        text = text.rjust(w, self._output_fill)
                     _disp = text.replace('\n', ' ').replace('\t', ' ').strip()
                     self._emit(line, f"Output: {_disp or '(newline)'}",
                                {'type': 'output', 'text': text})
@@ -1263,7 +1582,8 @@ class CppInterpreter:
             for child in ch:
                 inner = child
                 # Unwrap one level of implicit cast if present
-                if inner.kind in (CK.IMPLICIT_CAST_EXPR, CK.CSTYLE_CAST_EXPR):
+                if inner.kind in (CK.CSTYLE_CAST_EXPR, CK.CXX_STATIC_CAST_EXPR,
+                                   CK.CXX_FUNCTIONAL_CAST_EXPR, CK.UNEXPOSED_EXPR):
                     inner_ch = self._ch(inner)
                     if inner_ch: inner = inner_ch[0]
                 if inner.kind == CK.BINARY_OPERATOR and child.kind != CK.PAREN_EXPR:
@@ -1278,38 +1598,88 @@ class CppInterpreter:
         l = self._eval(ch[0])
         r = self._eval(ch[1])
 
-        # String comparison (== != <)
+        # array_ptr / array arithmetic: p+n, p-n, p-q, arr+n
+        if isinstance(l, dict) and l.get('kind') == 'array_ptr':
+            if op in ('+', '-') and not (isinstance(r, dict) and r.get('kind') == 'array_ptr'):
+                n = int(self._to_int(r))
+                return {**l, 'idx': l.get('idx', 0) + (n if op == '+' else -n)}
+            if op == '-' and isinstance(r, dict) and r.get('kind') == 'array_ptr':
+                return _INT(l.get('idx', 0) - r.get('idx', 0))
+            # array_ptr comparison: p < q, p != q, etc.
+            if op in ('<', '>', '<=', '>=', '==', '!=') and isinstance(r, dict) and r.get('kind') == 'array_ptr':
+                li, ri = l.get('idx', 0), r.get('idx', 0)
+                return _INT(int({'<': li<ri, '>': li>ri, '<=': li<=ri, '>=': li>=ri, '==': li==ri, '!=': li!=ri}[op]))
+        if isinstance(r, dict) and r.get('kind') == 'array_ptr' and op == '+':
+            n = int(self._to_int(l))
+            return {**r, 'idx': r.get('idx', 0) + n}
+        # Array (C-array) + int → array_ptr
+        if isinstance(l, dict) and l.get('kind') == 'array' and op in ('+', '-'):
+            if not (isinstance(r, dict) and r.get('kind') in ('array', 'array_ptr')):
+                n = int(self._to_int(r))
+                arr_name = ch[0].spelling if ch else ''
+                return {'kind': 'array_ptr', 'name': arr_name, 'idx': n if op == '+' else -n}
+        if isinstance(r, dict) and r.get('kind') == 'array' and op == '+':
+            n = int(self._to_int(l))
+            arr_name = ch[1].spelling if len(ch) > 1 else ''
+            return {'kind': 'array_ptr', 'name': arr_name, 'idx': n}
+
+        # Iterator comparison: compare idx directly (None = end sentinel)
+        if (isinstance(l, dict) and l.get('kind') == 'iterator' and
+                isinstance(r, dict) and r.get('kind') == 'iterator'):
+            li, ri = l.get('idx'), r.get('idx')
+            cmp = {'==': li == ri, '!=': li != ri,
+                   '<': (li or 0) < (ri or 0), '>': (li or 0) > (ri or 0),
+                   '<=': (li or 0) <= (ri or 0), '>=': (li or 0) >= (ri or 0)}
+            return _INT(int(cmp.get(op, False)))
+
+        # char op char
         if (isinstance(l, dict) and l.get('kind') == 'char' and
                 isinstance(r, dict) and r.get('kind') == 'char'):
             lv_s, rv_s = l.get('value', ''), r.get('value', '')
             if op == '==': return _INT(int(lv_s == rv_s))
             if op == '!=': return _INT(int(lv_s != rv_s))
             if op == '<':  return _INT(int(lv_s <  rv_s))
+            if op == '>':  return _INT(int(lv_s >  rv_s))
+            if op == '<=': return _INT(int(lv_s <= rv_s))
+            if op == '>=': return _INT(int(lv_s >= rv_s))
             if op == '+':  return {'kind': 'char', 'value': lv_s + rv_s}
+            # char - char → integer difference (like C++)
+            if op == '-':  return _INT(ord(lv_s[0]) - ord(rv_s[0]) if lv_s and rv_s else 0)
+        # char +/- int: result is char (only when rhs is NOT a char)
+        if (isinstance(l, dict) and l.get('kind') == 'char' and op in ('+', '-')
+                and not (isinstance(r, dict) and r.get('kind') == 'char')):
+            lv_c = ord(l.get('value', '\0')) if l.get('value') else 0
+            rv_c = self._to_int(r)
+            result_code = lv_c + int(rv_c) if op == '+' else lv_c - int(rv_c)
+            return {'kind': 'char', 'value': chr(result_code & 0xFF)}
 
         lv, rv = self._to_int(l), self._to_int(r)
+        is_fp = _is_float_val(l) or _is_float_val(r)
 
         if   op == '+':  result = lv + rv
         elif op == '-':  result = lv - rv
         elif op == '*':  result = lv * rv
         elif op == '/':
             if rv == 0: self._crash(cursor.location.line, 'division-by-zero', 'Division by zero')
-            result = lv // rv
+            result = lv / rv if is_fp else lv // rv
         elif op == '%':
             if rv == 0: self._crash(cursor.location.line, 'division-by-zero', 'Modulo by zero')
             result = lv % rv
-        elif op == '==': result = int(lv == rv)
-        elif op == '!=': result = int(lv != rv)
-        elif op == '<':  result = int(lv <  rv)
-        elif op == '>':  result = int(lv >  rv)
-        elif op == '<=': result = int(lv <= rv)
-        elif op == '>=': result = int(lv >= rv)
-        elif op == '&':  result = lv & rv
-        elif op == '|':  result = lv | rv
-        elif op == '^':  result = lv ^ rv
-        elif op == '<<': result = lv << (rv % 32)
-        elif op == '>>': result = lv >> (rv % 32)
+        elif op == '==': return _INT(int(lv == rv))
+        elif op == '!=': return _INT(int(lv != rv))
+        elif op == '<':  return _INT(int(lv <  rv))
+        elif op == '>':  return _INT(int(lv >  rv))
+        elif op == '<=': return _INT(int(lv <= rv))
+        elif op == '>=': return _INT(int(lv >= rv))
+        elif op == '&':  result = int(lv) & int(rv)
+        elif op == '|':  result = int(lv) | int(rv)
+        elif op == '^':  result = int(lv) ^ int(rv)
+        elif op == '<<': result = int(lv) << (int(rv) % 32)
+        elif op == '>>': result = int(lv) >> (int(rv) % 32)
         else:            result = 0
+
+        if is_fp:
+            return _FLOAT(float(result))
 
         # Integer overflow detection: warn and wrap to 32-bit signed range
         if op in ('+', '-', '*') and (result > 2147483647 or result < -2147483648):
@@ -1331,6 +1701,13 @@ class CppInterpreter:
         l_val = self._eval(ch[0])
         r_val = self._eval(ch[1])
 
+        # array_ptr += / -= n
+        if isinstance(l_val, dict) and l_val.get('kind') == 'array_ptr' and bop in ('+', '-'):
+            n = int(self._to_int(r_val))
+            new_val = {**l_val, 'idx': l_val.get('idx', 0) + (n if bop == '+' else -n)}
+            self._write_lval(ch[0], new_val, cursor.location.line)
+            return new_val
+
         # String += (concatenation)
         if (op == '+=' and isinstance(l_val, dict) and l_val.get('kind') == 'char'):
             ls = l_val.get('value', '')
@@ -1346,14 +1723,23 @@ class CppInterpreter:
 
         lv = self._to_int(l_val)
         rv = self._to_int(r_val)
-        result = {
-            '+': lv + rv,  '-': lv - rv,  '*': lv * rv,
-            '/': (lv // rv) if rv != 0 else 0,
-            '%': (lv %  rv) if rv != 0 else 0,
-            '&': lv & rv,  '|': lv | rv,  '^': lv ^ rv,
-            '<<': lv << (rv % 32), '>>': lv >> (rv % 32),
-        }.get(bop, rv)
-        new_val = _INT(result)
+        is_fp = _is_float_val(l_val) or _is_float_val(r_val)
+        if is_fp:
+            result = {
+                '+': lv + rv,  '-': lv - rv,  '*': lv * rv,
+                '/': (lv / rv) if rv != 0 else 0.0,
+                '%': (lv % rv) if rv != 0 else 0.0,
+            }.get(bop, rv)
+            new_val = _FLOAT(float(result))
+        else:
+            result = {
+                '+': lv + rv,  '-': lv - rv,  '*': lv * rv,
+                '/': (lv // rv) if rv != 0 else 0,
+                '%': (lv %  rv) if rv != 0 else 0,
+                '&': int(lv) & int(rv),  '|': int(lv) | int(rv),  '^': int(lv) ^ int(rv),
+                '<<': int(lv) << (int(rv) % 32), '>>': int(lv) >> (int(rv) % 32),
+            }.get(bop, rv)
+            new_val = _INT(result)
         self._write_lval(ch[0], new_val, cursor.location.line)
         return new_val
 
@@ -1386,10 +1772,12 @@ class CppInterpreter:
         if not ch:
             return _INT(0)
 
-        if op == '!':
+        if op in ('!', 'not'):
             return _INT(int(not self._truthy(self._eval(ch[0]))))
         if op == '-':
-            return _INT(-self._to_int(self._eval(ch[0])))
+            v = self._eval(ch[0])
+            n = self._to_int(v)
+            return _FLOAT(-n) if _is_float_val(v) else _INT(-int(n))
         if op == '+':
             return self._eval(ch[0])
         if op == '~':
@@ -1398,6 +1786,28 @@ class CppInterpreter:
             ptr = self._eval(ch[0])
             if not isinstance(ptr, dict):
                 return _INT(ptr) if isinstance(ptr, (int, float)) else _INT(0)
+            if ptr.get('kind') == 'iterator':
+                _data = ptr.get('data', [])
+                _idx  = ptr.get('idx')
+                if _idx is not None and 0 <= _idx < len(_data):
+                    _e = _data[_idx]
+                    if isinstance(_e, dict) and 'key' in _e:
+                        return _e.get('val', _INT(0))
+                    return _e if isinstance(_e, dict) else _INT(int(_e))
+                return _INT(0)
+            if ptr.get('kind') == 'array_ptr':
+                arr_name = ptr.get('name', '')
+                idx = ptr.get('idx', 0)
+                try:
+                    arr = self.memory.get_var(arr_name)
+                    if isinstance(arr, dict) and arr.get('kind') == 'array':
+                        vals = arr.get('values', [])
+                        if 0 <= idx < len(vals):
+                            v = vals[idx]
+                            return v if isinstance(v, dict) else _INT(int(v))
+                except RuntimeError:
+                    pass
+                return _INT(0)
             if ptr.get('kind') != 'pointer':
                 # * on a non-pointer (e.g. result of max_element): return the value itself
                 return ptr
@@ -1411,6 +1821,18 @@ class CppInterpreter:
                     if 0 <= offset < len(vals):
                         v = vals[offset]
                         return v if isinstance(v, dict) else _INT(int(v))
+            if addr == '__this__':
+                # *this — return current object value from the this binding
+                if self._this_stack:
+                    b = self._this_stack[-1]
+                    if b.kind == 'stack' and b.frame_idx is not None:
+                        return copy.deepcopy(
+                            self.memory.stack[b.frame_idx]['variables'].get(b.var_name, _INT(0))
+                        )
+                    if b.kind == 'heap' and b.addr and b.addr in self.memory.heap:
+                        fields = self.memory.heap[b.addr].get('fields', {})
+                        return {'kind': 'struct', 'fields': copy.deepcopy(fields), 'class': b.class_name}
+                return _INT(0)
             return self.memory.read_via_addr(addr, line)
         if op == '&':
             if ch[0].kind == CK.DECL_REF_EXPR:
@@ -1422,8 +1844,20 @@ class CppInterpreter:
         if op in ('++', '--'):                  # prefix
             val     = self._eval(ch[0])
             delta   = 1 if op == '++' else -1
-            if isinstance(val, dict) and val.get('kind') == 'pointer':
+            if isinstance(val, dict) and val.get('kind') == 'iterator':
+                _data = val.get('data', [])
+                _cur  = val.get('idx')
+                _cur  = 0 if _cur is None else _cur
+                _new  = _cur + delta
+                new_val = {**val, 'idx': None if _new >= len(_data) else _new}
+            elif isinstance(val, dict) and val.get('kind') == 'array_ptr':
+                new_val = {**val, 'idx': val.get('idx', 0) + delta}
+            elif isinstance(val, dict) and val.get('kind') == 'pointer':
                 new_val = self._pointer_advance(val, delta, line)
+            elif isinstance(val, dict) and val.get('kind') == 'char':
+                new_val = {'kind': 'char', 'value': chr((ord(val.get('value', '\0')) + delta) & 0xFF)}
+            elif _is_float_val(val):
+                new_val = _FLOAT(val.get('value', 0.0) + delta)
             else:
                 new_val = _INT(self._to_int(val) + delta)
             self._write_lval(ch[0], new_val, line)
@@ -1431,8 +1865,20 @@ class CppInterpreter:
         if op in ('p++', 'p--'):                # postfix
             val     = self._eval(ch[0])
             delta   = 1 if op == 'p++' else -1
-            if isinstance(val, dict) and val.get('kind') == 'pointer':
+            if isinstance(val, dict) and val.get('kind') == 'iterator':
+                _data = val.get('data', [])
+                _cur  = val.get('idx')
+                _cur  = 0 if _cur is None else _cur
+                _new  = _cur + delta
+                new_val = {**val, 'idx': None if _new >= len(_data) else _new}
+            elif isinstance(val, dict) and val.get('kind') == 'array_ptr':
+                new_val = {**val, 'idx': val.get('idx', 0) + delta}
+            elif isinstance(val, dict) and val.get('kind') == 'pointer':
                 new_val = self._pointer_advance(val, delta, line)
+            elif isinstance(val, dict) and val.get('kind') == 'char':
+                new_val = {'kind': 'char', 'value': chr((ord(val.get('value', '\0')) + delta) & 0xFF)}
+            elif _is_float_val(val):
+                new_val = _FLOAT(val.get('value', 0.0) + delta)
             else:
                 new_val = _INT(self._to_int(val) + delta)
             self._write_lval(ch[0], new_val, line)
@@ -1571,6 +2017,20 @@ class CppInterpreter:
             if len(ich) >= 2:
                 row = self._to_int(self._eval(ich[1]))
                 arr_val = self._eval(ich[0])
+                # Resolve array_ptr to actual array (2D array passed to function)
+                if isinstance(arr_val, dict) and arr_val.get('kind') == 'array_ptr':
+                    # Prefer embedded data (avoids shadowing by same-named parameter)
+                    _embedded = arr_val.get('data')
+                    if isinstance(_embedded, dict) and _embedded.get('kind') == 'array':
+                        arr_val = _embedded
+                    else:
+                        _rn = arr_val.get('name', '')
+                        try:
+                            _ra = self.memory.get_var(_rn)
+                            if isinstance(_ra, dict) and _ra.get('kind') == 'array':
+                                arr_val = _ra
+                        except RuntimeError:
+                            pass
                 vals = arr_val.get('values', []) if isinstance(arr_val, dict) else []
                 line = cursor.location.line
                 n_rows = arr_val.get('rows')
@@ -1589,6 +2049,25 @@ class CppInterpreter:
                 return _INT(int(row_list)) if isinstance(row_list, (int, float)) else row_list
 
         arr_val = self._eval(arr_c)
+        # array_ptr subscript: p[i] → arr[ptr.idx + i]
+        if isinstance(arr_val, dict) and arr_val.get('kind') == 'array_ptr':
+            arr_name = arr_val.get('name', '')
+            base_idx = arr_val.get('idx', 0)
+            try:
+                arr = self.memory.get_var(arr_name)
+                # If name lookup returned the array_ptr itself (same name, callee shadows
+                # caller), fall back to embedded data (struct/char array parameters).
+                if isinstance(arr, dict) and arr.get('kind') == 'array_ptr':
+                    arr = arr.get('data')
+                if isinstance(arr, dict) and arr.get('kind') == 'array':
+                    vals = arr.get('values', [])
+                    real_idx = base_idx + int(idx)
+                    if 0 <= real_idx < len(vals):
+                        v = vals[real_idx]
+                        return v if isinstance(v, dict) else _INT(int(v))
+            except RuntimeError:
+                pass
+            return _INT(0)
         if isinstance(arr_val, dict) and arr_val.get('kind') == 'char':
             s = arr_val.get('value', '')
             if 0 <= idx < len(s):
@@ -1630,7 +2109,8 @@ class CppInterpreter:
                 if arr_field and arr_field.get('kind') == 'array':
                     vals = arr_field.get('values', [])
                     if 0 <= idx < len(vals):
-                        return _INT(vals[idx])
+                        v = vals[idx]
+                        return v if isinstance(v, dict) else _INT(v)
                 # Fall back to scalar 'value' field for ptr[0]
                 if idx == 0:
                     return block['fields'].get('value', _INT(0))
@@ -1688,13 +2168,20 @@ class CppInterpreter:
                                 if not (c.kind == CK.UNEXPOSED_EXPR and c.spelling == 'operator()')]
                 real_args = [self._eval(c) for c in real_args_ch]
                 return self._call_stored_lambda(lambda_name, real_args, line)
+            # Functor: struct/class object with operator()
+            if lambda_name:
+                try: _fobj = self.memory.get_var(lambda_name)
+                except: _fobj = None
+                if isinstance(_fobj, dict) and _fobj.get('kind') == 'struct':
+                    _fc = _fobj.get('class', '')
+                    if _fc and _fc in self.class_defs and 'operator()' in self.class_defs[_fc].get('methods', {}):
+                        _rch = [c for c in ch[1:]
+                                if not (c.kind == CK.UNEXPOSED_EXPR and c.spelling == 'operator()')]
+                        return self._call_method_on_stack(_fc, lambda_name, None, 'operator()', [self._eval(c) for c in _rch], line)
 
-        # ── operator!= / operator== iterator comparison ────────────────────
-        # Structure: CALL_EXPR 'operator!=' with
-        #   ch[0] = UNEXPOSED_EXPR wrapping the left iterator
-        #   ch[1] = UNEXPOSED_EXPR 'operator!=' (method-ref descriptor — skip)
-        #   ch[2] = the right iterator (e.g. s.end())
-        if fn in ('operator!=', 'operator=='):
+        # ── comparison operators (iterator, string, struct) ────────────────
+        if fn in ('operator!=', 'operator==', 'operator<', 'operator>',
+                  'operator<=', 'operator>='):
             real_args = []
             for cand in ch:
                 sp = cand.spelling or ''
@@ -1703,10 +2190,30 @@ class CppInterpreter:
                     continue  # method-ref descriptor slot
                 real_args.append(cand)
             if len(real_args) >= 2:
-                lv = self._to_int(self._eval(real_args[0]))
-                rv = self._to_int(self._eval(real_args[1]))
-                if fn == 'operator!=': return _INT(int(lv != rv))
-                return _INT(int(lv == rv))
+                lv_val = self._eval(real_args[0])
+                rv_val = self._eval(real_args[1])
+                # Iterator comparison: compare idx directly (None = end)
+                if (isinstance(lv_val, dict) and lv_val.get('kind') == 'iterator' and
+                        isinstance(rv_val, dict) and rv_val.get('kind') == 'iterator'):
+                    li, ri = lv_val.get('idx'), rv_val.get('idx')
+                    cmp = {'operator==': li == ri, 'operator!=': li != ri,
+                           'operator<': (li or 0) < (ri or 0), 'operator>': (li or 0) > (ri or 0),
+                           'operator<=': (li or 0) <= (ri or 0), 'operator>=': (li or 0) >= (ri or 0)}
+                    return _INT(int(cmp.get(fn, False)))
+                # String (char kind) comparison
+                if (isinstance(lv_val, dict) and lv_val.get('kind') == 'char' and
+                        isinstance(rv_val, dict) and rv_val.get('kind') == 'char'):
+                    ls, rs = lv_val.get('value', ''), rv_val.get('value', '')
+                    cmp = {'operator==': ls == rs, 'operator!=': ls != rs,
+                           'operator<': ls < rs, 'operator>': ls > rs,
+                           'operator<=': ls <= rs, 'operator>=': ls >= rs}
+                    return _INT(int(cmp.get(fn, False)))
+                lv = self._to_int(lv_val)
+                rv = self._to_int(rv_val)
+                cmp = {'operator==': lv == rv, 'operator!=': lv != rv,
+                       'operator<': lv < rv, 'operator>': lv > rv,
+                       'operator<=': lv <= rv, 'operator>=': lv >= rv}
+                return _INT(int(cmp.get(fn, False)))
 
         # ── operator* iterator dereference ─────────────────────────────────
         # Appears as CALL_EXPR 'operator*' when libclang resolves template types
@@ -1719,9 +2226,42 @@ class CppInterpreter:
                 data = val.get('data', [])
                 if idx is not None and 0 <= idx < len(data):
                     e = data[idx]
-                    return e.get('val', _INT(0)) if isinstance(e, dict) and 'key' in e else _INT(0)
+                    if isinstance(e, dict) and 'key' in e:
+                        return e.get('val', _INT(0))
+                    return e if isinstance(e, dict) else _INT(int(e))
                 return _INT(0)
             return val
+
+        # ── operator++ / operator-- on iterator (CALL_EXPR form) ────────────
+        if fn in ('operator++', 'operator--'):
+            # Find the variable cursor (skip method-ref slots)
+            _var_c = None
+            for _cand in ch:
+                _sp = _cand.spelling or ''
+                _tp = _cand.type.spelling if _cand.type else ''
+                if _cand.kind == CK.UNEXPOSED_EXPR and _sp.startswith('operator') and '(*)' in _tp:
+                    continue
+                _var_c = _cand
+                break
+            if _var_c is not None:
+                _val = self._eval(_var_c)
+                _delta = 1 if fn == 'operator++' else -1
+                if isinstance(_val, dict) and _val.get('kind') == 'iterator':
+                    _data = _val.get('data', [])
+                    _cur  = _val.get('idx')
+                    _cur  = 0 if _cur is None else _cur
+                    _new  = _cur + _delta
+                    _new_val = {**_val, 'idx': None if _new >= len(_data) else _new}
+                    self._write_lval(_var_c, _new_val, line)
+                    return _new_val
+                elif isinstance(_val, dict) and _val.get('kind') == 'array_ptr':
+                    _new_val = {**_val, 'idx': _val.get('idx', 0) + _delta}
+                    self._write_lval(_var_c, _new_val, line)
+                    return _new_val
+                else:
+                    _new_val = _INT(self._to_int(_val) + _delta)
+                    self._write_lval(_var_c, _new_val, line)
+                    return _new_val
 
         # ── operator+ string concatenation ─────────────────────────────────
         if fn in ('operator+', 'operator+='):
@@ -1766,19 +2306,47 @@ class CppInterpreter:
                     if obj_name:
                         self.memory.set_var(obj_name, result)
                 return result
+            # User-defined operator+ on struct/class
+            if isinstance(lhs, dict) and lhs.get('kind') == 'struct':
+                class_name = self._base_type(
+                    callee_c.type.spelling if callee_c and callee_c.type else '')
+                if class_name and class_name in self.class_defs:
+                    op_key = fn  # 'operator+' or 'operator+='
+                    methods = self.class_defs[class_name].get('methods', {})
+                    if op_key in methods:
+                        obj_name = self._cursor_name(callee_c) if callee_c else ''
+                        if obj_name:
+                            return self._call_method_on_stack(
+                                class_name, obj_name, callee_c, op_key, [rhs], line,
+                                arg_cursors=[rhs_c] if rhs_c else None)
             return _INT(0)
 
         # ── cout << expr  (ch[0]=DECL_REF_EXPR 'cout', ch[1]=method-ref, ch[2]=arg)
         #    Also handles chaining: (cout<<a)<<b where ch[0] is another CALL_EXPR
-        if fn == 'operator<<':
+        if fn in ('operator<<', ''):
             def _is_cout_stream(c) -> bool:
                 if c is None:
                     return False
                 if c.kind == CK.DECL_REF_EXPR and c.spelling in ('cout', 'cerr'):
                     return True
-                if c.kind == CK.CALL_EXPR and c.spelling == 'operator<<':
+                if c.kind == CK.DECL_REF_EXPR and c.spelling not in ('cerr',):
+                    # Variable bound to ostream sentinel (e.g. ostream& out param)
+                    try:
+                        v = self.memory.get_var(c.spelling)
+                        if isinstance(v, dict) and v.get('kind') == 'ostream':
+                            return True
+                    except RuntimeError:
+                        pass
+                if c.kind == CK.CALL_EXPR and c.spelling in ('operator<<', ''):
                     sub = self._ch(c)
                     return _is_cout_stream(sub[0] if sub else None)
+                return False
+            def _is_cerr_stream(c) -> bool:
+                if c is None: return False
+                if c.kind == CK.DECL_REF_EXPR and c.spelling == 'cerr': return True
+                if c.kind == CK.CALL_EXPR and c.spelling in ('operator<<', ''):
+                    sub = self._ch(c)
+                    return _is_cerr_stream(sub[0] if sub else None)
                 return False
             if _is_cout_stream(callee_c):
                 # Evaluate the left side (recursively emits its own output for chaining)
@@ -1787,32 +2355,84 @@ class CppInterpreter:
                 # (those are method-reference slots libclang inserts, not real args)
                 for cand in ch[1:]:
                     sp = cand.spelling or ''
+                    # Skip operator<< method-ref slots
                     if cand.kind == CK.UNEXPOSED_EXPR and sp == 'operator<<':
-                        continue  # method-ref slot — skip
-                    # endl / ends → newline
+                        continue
+                    # Skip DECL_REF_EXPR wrapping OVERLOADED_DECL_REF 'operator<<'
+                    if cand.kind == CK.DECL_REF_EXPR and not sp:
+                        sub = self._ch(cand)
+                        if sub and sub[0].kind == CK.OVERLOADED_DECL_REF and sub[0].spelling == 'operator<<':
+                            continue
+                    # endl: direct DECL_REF or OVERLOADED wrapper
                     if sp in ('endl', 'std::endl', 'ends'):
                         self._emit(line, 'Output: newline', {'type': 'output', 'text': '\n'})
                         break
+                    if cand.kind == CK.DECL_REF_EXPR and not sp:
+                        sub = self._ch(cand)
+                        if sub and sub[0].kind == CK.OVERLOADED_DECL_REF and sub[0].spelling in ('endl', 'ends'):
+                            self._emit(line, 'Output: newline', {'type': 'output', 'text': '\n'})
+                            break
+                    # Stream manipulators by token name
+                    if sp in ('hex', 'std::hex'):
+                        self._output_hex = True; break
+                    if sp in ('dec', 'std::dec'):
+                        self._output_hex = False; break
+                    if sp in ('fixed', 'std::fixed'):
+                        self._output_fixed = True; break
+                    if sp in ('scientific', 'std::scientific'):
+                        self._output_fixed = True; break
                     # Real argument — unwrap UNEXPOSED_EXPR wrapper if present
                     real = (self._unwrap(cand) or cand) if cand.kind == CK.UNEXPOSED_EXPR else cand
                     val  = self._eval(real)
+                    # Stream manipulator values (setw/setfill)
+                    if isinstance(val, dict) and val.get('kind') == 'manip':
+                        mt = val.get('mtype')
+                        if mt == 'setw':         self._output_width = val.get('value', 0)
+                        elif mt == 'setfill':    self._output_fill = val.get('value', ' ')
+                        elif mt == 'setprecision': self._output_precision = val.get('value', -1)
+                        elif mt == 'fixed':      self._output_fixed = True
+                        elif mt == 'scientific': self._output_fixed = True
+                        break
+                    # Free operator<<(ostream&, ClassName): e.g. ostream& operator<<(ostream&, const Point&)
+                    if (isinstance(val, dict) and val.get('kind') == 'struct'
+                            and 'operator<<' in self.func_defs):
+                        _cls = val.get('class', '')
+                        _op_c = self.func_defs['operator<<']
+                        _op_params = self._get_params(_op_c)
+                        if len(_op_params) >= 2:
+                            _p2_type = _op_params[1].type.spelling if _op_params[1].type else ''
+                            if not _p2_type or _cls in _p2_type or 'auto' in _p2_type or not _cls:
+                                self._call_user_function('operator<<', [{'kind': 'ostream'}, val], line)
+                                break
                     text = self._val_to_output_text(val)
                     if text is not None and (text or text == '0'):
+                        # Apply hex formatting
+                        if self._output_hex and isinstance(val, dict) and val.get('kind') == 'int':
+                            text = hex(val.get('value', 0))[2:]  # strip '0x' prefix
+                        # Apply setw/setfill padding
+                        w = self._output_width
+                        self._output_width = 0  # reset after use
+                        if w > len(text):
+                            text = text.rjust(w, self._output_fill)
                         _disp = text.replace('\n', ' ').replace('\t', ' ').strip()
                         self._emit(line, f"Output: {_disp or '(newline)'}",
                                    {'type': 'output', 'text': text})
                     break
                 return _INT(0)
+            # ── user-defined operator<< on class objects (e.g. q << 1 << 2) ──
+            _r = self._dispatch_user_stream_op(fn or 'operator<<', callee_c, ch, line)
+            if _r is not None:
+                return _r
 
         # ── cin >> var  (ch[0]=DECL_REF_EXPR 'cin', ch[1]=method-ref, ch[2]=target)
         #    Also handles chaining: (cin>>a)>>b where ch[0] is another CALL_EXPR
-        if fn == 'operator>>':
+        if fn in ('operator>>', ''):
             def _is_cin_stream(c) -> bool:
                 if c is None:
                     return False
                 if c.kind == CK.DECL_REF_EXPR and c.spelling == 'cin':
                     return True
-                if c.kind == CK.CALL_EXPR and c.spelling == 'operator>>':
+                if c.kind == CK.CALL_EXPR and c.spelling in ('operator>>', ''):
                     sub = self._ch(c)
                     return _is_cin_stream(sub[0] if sub else None)
                 return False
@@ -1820,16 +2440,24 @@ class CppInterpreter:
                 # Evaluate left side first (handles chaining — cin >> a in cin >> a >> b)
                 self._eval(callee_c)
                 # Find the target variable cursor (skip method-ref slots)
+                _read_ok = False
                 for cand in ch[1:]:
                     sp = cand.spelling or ''
                     if cand.kind == CK.UNEXPOSED_EXPR and sp == 'operator>>':
                         continue  # method-ref slot — skip
                     real = (self._unwrap(cand) or cand) if cand.kind == CK.UNEXPOSED_EXPR else cand
                     type_spell = real.type.spelling if real.type else ''
+                    _had_tokens = self._stdin_pos < len(self._stdin_tokens)
                     val = self._cin_read_next(type_spell)
                     self._write_lval(real, val, line)
+                    _read_ok = _had_tokens
                     break
-                return _INT(0)
+                # Return 1 (truthy) if read succeeded (for while(cin>>n) loops), 0 at EOF
+                return _INT(1 if _read_ok else 0)
+            # ── user-defined operator>> on class objects ──
+            _r = self._dispatch_user_stream_op(fn or 'operator>>', callee_c, ch, line)
+            if _r is not None:
+                return _r
 
         # ── member-function / method call ──────────────────────────────────
         if callee_c and callee_c.kind == CK.MEMBER_REF_EXPR:
@@ -1923,6 +2551,8 @@ class CppInterpreter:
                         return self._call_string_method(obj_name, obj_c, method_name, args, line)
                     if _rk == 'multiset':
                         return self._call_multiset_method(obj_name, method_name, args, line)
+                    if _rk in ('set', 'map'):
+                        return self._call_map_method(obj_name, _rv.get('label', _rk + '<int>'), method_name, args, line, arg_cursors=arg_cursors)
                     if _rk == 'array':
                         _ct = _rv.get('ctype', '')
                         if any(c in _ct for c in ('stack', 'queue', 'deque', 'priority_queue')):
@@ -1943,10 +2573,20 @@ class CppInterpreter:
         if fn in self.class_defs:
             args = [self._eval(c) for c in ch
                     if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
-            # Copy construction: CALL_EXPR 'ClassName'(obj) where obj is already a
-            # struct of the same class (e.g. `return C` → copy ctor call).
-            # Return a deep copy instead of constructing a fresh zeroed object.
-            if len(args) == 1 and isinstance(args[0], dict) and args[0].get('kind') == 'struct':
+            # Copy construction: if arg is a struct of same class, prefer copy ctor
+            if (len(args) == 1 and isinstance(args[0], dict) and args[0].get('kind') == 'struct'
+                    and args[0].get('class') == fn):
+                _copy_ctor = self._find_copy_ctor(fn)
+                if _copy_ctor:
+                    _cd = self.class_defs[fn]
+                    _fields = {}
+                    for _base in _cd.get('bases', []):
+                        if _base in self.class_defs:
+                            _fields.update({f: self._default_for_type(t)
+                                            for f, t in self.class_defs[_base]['fields'].items()})
+                    _fields.update({f: self._default_for_type(t) for f, t in _cd['fields'].items()})
+                    _obj = {'kind': 'struct', 'fields': _fields, 'class': fn}
+                    return self._run_ctor_on_stack_val(fn, _obj, _copy_ctor, args, line)
                 return copy.deepcopy(args[0])
             return self._build_class_value(fn, args, line)
 
@@ -1999,6 +2639,42 @@ class CppInterpreter:
                     return {'kind': 'char', 'value': ''}
             return {'kind': 'char', 'value': ''}
 
+        # ── dependent-type method call recovery ───────────────────────────────
+        # e.g. m.at("a"), s.contains(x) where type is '<dependent type>'.
+        # AST: CALL_EXPR '' (UNEXPOSED_EXPR '' (DECL_REF_EXPR 'obj'), arg...)
+        # Method name is not in any node — recover from tokens.
+        if fn == '' and callee_c and callee_c.kind == CK.UNEXPOSED_EXPR:
+            _actual = self._unwrap(callee_c) or callee_c
+            if _actual and _actual.kind == CK.DECL_REF_EXPR and _actual.spelling:
+                _obj_name = _actual.spelling
+                # recover method name from tokens: ['obj', '.', 'method', '(', ...]
+                _toks = [t.spelling for t in cursor.get_tokens()]
+                _method = ''
+                for _ti, _t in enumerate(_toks):
+                    if _t in ('.', '->') and _ti + 1 < len(_toks):
+                        _candidate = _toks[_ti + 1]
+                        if _candidate not in ('', '(', ')'):
+                            _method = _candidate
+                            break
+                if _method:
+                    _arg_ch = ch[1:]
+                    _args = [self._eval(c) for c in _arg_ch]
+                    try:
+                        _ov = self.memory.get_var(_obj_name)
+                    except RuntimeError:
+                        _ov = None
+                    if isinstance(_ov, dict):
+                        _ok = _ov.get('kind')
+                        _ot = _ov.get('label', '')
+                        if _ok == 'char':
+                            return self._call_string_method(_obj_name, callee_c, _method, _args, line)
+                        if _ok in ('set', 'map'):
+                            return self._call_map_method(_obj_name, _ot or _ok + '<int>', _method, _args, line, arg_cursors=_arg_ch)
+                        if _ok == 'array' or self._is_vector_type(_ot):
+                            return self._call_vector_method(_obj_name, callee_c, _method, _args, line)
+                        if _ok == 'multiset':
+                            return self._call_multiset_method(_obj_name, _method, _args, line)
+
         # ── free function call ─────────────────────────────────────────────
         # ch[0] is the callee DECL_REF_EXPR (or UNEXPOSED_EXPR wrapping it)
         fn_name = fn
@@ -2018,6 +2694,11 @@ class CppInterpreter:
         arg_ch = ch[1:] if (callee_c and callee_c.kind in
                             (CK.DECL_REF_EXPR, CK.UNEXPOSED_EXPR,
                              CK.MEMBER_REF_EXPR)) else ch
+        # Filter out libclang-injected default arg expressions: they have source
+        # locations outside user code (line == 0, or within stubs area).
+        # Real user-provided args always land in user code (line > _STUBS_LINES).
+        arg_ch = [c for c in arg_ch
+                  if c.location.file and c.location.line > _STUBS_LINES]
         args = [self._eval(c) for c in arg_ch]
         return self._call_function(fn_name, args, line, arg_cursors=arg_ch)
 
@@ -2164,7 +2845,16 @@ class CppInterpreter:
             n_rows = len(rows)
             n_cols = max((len(r) for r in rows), default=0)
             return {'kind': 'array', 'values': rows, 'rows': n_rows, 'cols': n_cols}
-        vals = [self._to_int(self._eval(c)) for c in ch]
+        vals = []
+        for c in ch:
+            v = self._eval(c)
+            # Preserve non-numeric values (strings, structs, pointers) so that
+            # vector<string>, vector<pair>, etc. store the correct element types.
+            if isinstance(v, dict) and v.get('kind') in ('char', 'struct', 'pointer',
+                                                          'array', 'map', 'set'):
+                vals.append(v)
+            else:
+                vals.append(self._to_int(v))
         return {'kind': 'array', 'values': vals}
 
     def _make_pair(self, first, second) -> dict:
@@ -2216,6 +2906,18 @@ class CppInterpreter:
 
         if k == CK.DECL_REF_EXPR:
             name = cursor.spelling
+            # Redirect write through reference variables
+            try:
+                existing = self.memory.get_var(name)
+                if isinstance(existing, dict) and existing.get('kind') == 'ref':
+                    target = existing['target']
+                    self.memory.set_var(target, rval)
+                    self.memory.update_line(line)
+                    self._emit(line, f"{target} = {self._fmt(rval)}.",
+                               {'type': 'assign', 'target': target, 'value': self._fmt(rval)})
+                    return
+            except RuntimeError:
+                pass
             # Check if this is a local var or a this-field
             found_local = False
             for frame in reversed(self.memory.stack):
@@ -2267,7 +2969,7 @@ class CppInterpreter:
                 and rval.get('value') == 0):
             rval = {'kind': 'pointer', 'address': None}
 
-        field = cursor.spelling
+        field = cursor.spelling or self._member_field_name(cursor)
         ch    = self._ch(cursor)
 
         if not ch or ch[0].kind == CK.CXX_THIS_EXPR:
@@ -2329,6 +3031,26 @@ class CppInterpreter:
 
         # 1-D write
         arr_name, arr_val = self._resolve_array(arr_c, line)
+        if isinstance(arr_val, dict) and arr_val.get('kind') == 'array_ptr':
+            # array_ptr: look up the underlying array and write through
+            _real_name = arr_val.get('name', '')
+            _base_idx  = arr_val.get('idx', 0)
+            try:
+                _real_arr = self.memory.get_var(_real_name)
+                # If name lookup returned the array_ptr itself (same name in callee),
+                # fall back to embedded data.
+                if isinstance(_real_arr, dict) and _real_arr.get('kind') == 'array_ptr':
+                    _real_arr = _real_arr.get('data')
+            except RuntimeError:
+                _real_arr = None
+            if isinstance(_real_arr, dict) and _real_arr.get('kind') == 'array':
+                _real_idx = _base_idx + idx
+                v = self._arr_set(_real_arr, [_real_idx], rval, line)
+                self.memory.set_var(_real_name, _real_arr)
+                self.memory.update_line(line)
+                self._emit(line, f"{_real_name}[{_real_idx}] = {v}.",
+                           {'type': 'assign', 'target': f'{_real_name}[{_real_idx}]', 'value': str(v)})
+            return
         if isinstance(arr_val, dict) and arr_val.get('kind') == 'array':
             v = self._arr_set(arr_val, [idx], rval, line)
             self._put_array(arr_name, arr_c, arr_val, line)
@@ -2516,7 +3238,9 @@ class CppInterpreter:
                 self._write_this_field(field, arr_val, line)
 
     def _member_field_name(self, cursor) -> str:
-        """Extract field name from a MEMBER_REF_EXPR (possibly wrapped)."""
+        """Extract field name from a MEMBER_REF_EXPR (possibly wrapped).
+        Falls back to token-based recovery for template dependent types where
+        libclang leaves spelling empty."""
         if cursor is None:
             return ''
         k = cursor.kind
@@ -2524,7 +3248,13 @@ class CppInterpreter:
             ch = self._ch(cursor)
             return self._member_field_name(ch[0]) if ch else ''
         if k == CK.MEMBER_REF_EXPR:
-            return cursor.spelling
+            if cursor.spelling:
+                return cursor.spelling
+            # Dependent type: recover from tokens  n -> field  or  obj . field
+            toks = [t.spelling for t in cursor.get_tokens()]
+            for i, t in enumerate(toks):
+                if t in ('->', '.') and i + 1 < len(toks):
+                    return toks[i + 1]
         return ''
 
     # ── Reference parameter write-back helpers ───────────────────────────────
@@ -2536,6 +3266,22 @@ class CppInterpreter:
             cursor = ch[0] if ch else None
         if cursor and cursor.kind == CK.DECL_REF_EXPR:
             return cursor.spelling
+        # CALL_EXPR returning T&: propagate through to find the ref'd variable.
+        # e.g. preinc(preinc(x)) — outer arg is CALL_EXPR 'preinc', its ref param
+        # points to x. We follow the chain so the outer writeback updates x too.
+        if cursor and cursor.kind == CK.CALL_EXPR:
+            fn = cursor.spelling
+            if fn and fn in self.func_defs:
+                fn_c = self.func_defs[fn]
+                ret_type = fn_c.result_type.spelling if fn_c.result_type else ''
+                if '&' in ret_type and '*' not in ret_type:
+                    # Find first ref-typed param's arg cursor
+                    params = self._get_params(fn_c)
+                    arg_ch = self._ch(cursor)[1:]  # skip callee
+                    for pi, param in enumerate(params):
+                        pts = param.type.spelling if param.type else ''
+                        if '&' in pts and '*' not in pts and pi < len(arg_ch):
+                            return self._ref_target_name(arg_ch[pi])
         return ''
 
     def _setup_ref_writeback(self, params, arg_cursors, caller_frame_idx) -> list:
@@ -2611,6 +3357,16 @@ class CppInterpreter:
             self._emit(line, ch, {'type': 'output', 'text': ch})
             return _INT(self._to_int(args[0]))
 
+        if fn_name in ('setw', 'std::setw') and args:
+            return {'kind': 'manip', 'mtype': 'setw', 'value': int(self._to_int(args[0]))}
+        if fn_name in ('setfill', 'std::setfill') and args:
+            v = args[0]
+            ch_val = v.get('value', ' ') if isinstance(v, dict) and v.get('kind') == 'char' else ' '
+            return {'kind': 'manip', 'mtype': 'setfill', 'value': ch_val}
+        if fn_name in ('setprecision', 'std::setprecision') and args:
+            return {'kind': 'manip', 'mtype': 'setprecision', 'value': int(self._to_int(args[0]))}
+        if fn_name in ('fixed', 'std::fixed', 'scientific', 'std::scientific'):
+            return {'kind': 'manip', 'mtype': fn_name.split('::')[-1]}
         if fn_name in ('sprintf', 'cout', 'print', 'cin', 'fgets'):
             return _INT(0)
         if fn_name == 'exit':
@@ -2623,44 +3379,64 @@ class CppInterpreter:
                            {'type': 'crash', 'reason': f'assert({expr_text}) failed'})
                 raise SegFaultError('assert', f'assert({expr_text}) failed', line=line)
             return _INT(0)
-        if fn_name == 'abs' and args:
-            return _INT(abs(self._to_int(args[0])))
+        if fn_name in ('abs', 'std::abs', 'fabs', 'std::fabs') and args:
+            v = self._to_int(args[0])
+            return _FLOAT(abs(float(v))) if _is_float_val(args[0]) else _INT(abs(int(v)))
         if fn_name in ('sqrt', 'std::sqrt') and args:
             import math
             v = self._to_int(args[0])
-            return _INT(int(math.isqrt(v)) if v >= 0 else 0)
+            return _FLOAT(math.sqrt(max(float(v), 0.0)))
         if fn_name in ('floor', 'std::floor') and args:
             import math
-            return _INT(int(math.floor(self._to_int(args[0]))))
+            return _FLOAT(math.floor(self._to_int(args[0])))
         if fn_name in ('ceil', 'std::ceil') and args:
             import math
-            return _INT(int(math.ceil(self._to_int(args[0]))))
+            return _FLOAT(math.ceil(self._to_int(args[0])))
         if fn_name in ('pow', 'std::pow') and len(args) >= 2:
             import math
-            return _INT(int(math.pow(self._to_int(args[0]), self._to_int(args[1]))))
+            return _FLOAT(math.pow(self._to_int(args[0]), self._to_int(args[1])))
         if fn_name in ('log', 'std::log') and args:
             import math
             v = self._to_int(args[0])
-            return _INT(int(math.log(v)) if v > 0 else 0)
+            return _FLOAT(math.log(float(v)) if v > 0 else 0.0)
         if fn_name in ('log2', 'std::log2') and args:
             import math
             v = self._to_int(args[0])
-            return _INT(int(math.log2(v)) if v > 0 else 0)
+            return _FLOAT(math.log2(float(v)) if v > 0 else 0.0)
+        if fn_name in ('sin', 'std::sin', 'cos', 'std::cos', 'tan', 'std::tan') and args:
+            import math
+            v = float(self._to_int(args[0]))
+            fn_map = {'sin': math.sin, 'std::sin': math.sin, 'cos': math.cos, 'std::cos': math.cos,
+                      'tan': math.tan, 'std::tan': math.tan}
+            return _FLOAT(fn_map[fn_name](v))
+        if fn_name in ('atan', 'std::atan', 'atan2', 'std::atan2') and args:
+            import math
+            v = float(self._to_int(args[0]))
+            if fn_name in ('atan2', 'std::atan2') and len(args) >= 2:
+                return _FLOAT(math.atan2(v, float(self._to_int(args[1]))))
+            return _FLOAT(math.atan(v))
+        if fn_name in ('round', 'std::round') and args:
+            import math
+            return _FLOAT(round(float(self._to_int(args[0]))))
         if fn_name in ('min', 'std::min'):
             if len(args) >= 2:
-                return _INT(min(self._to_int(args[0]), self._to_int(args[1])))
+                a0, a1 = self._to_int(args[0]), self._to_int(args[1])
+                res = min(a0, a1)
+                return _FLOAT(float(res)) if (_is_float_val(args[0]) or _is_float_val(args[1])) else _INT(int(res))
             if len(args) == 1 and isinstance(args[0], dict) and args[0].get('kind') == 'array':
                 vals = args[0].get('values', [])
                 return _INT(min(self._to_int(v) for v in vals)) if vals else _INT(0)
             return _INT(0)
         if fn_name in ('max', 'std::max'):
             if len(args) >= 2:
-                return _INT(max(self._to_int(args[0]), self._to_int(args[1])))
+                a0, a1 = self._to_int(args[0]), self._to_int(args[1])
+                res = max(a0, a1)
+                return _FLOAT(float(res)) if (_is_float_val(args[0]) or _is_float_val(args[1])) else _INT(int(res))
             if len(args) == 1 and isinstance(args[0], dict) and args[0].get('kind') == 'array':
                 vals = args[0].get('values', [])
                 return _INT(max(self._to_int(v) for v in vals)) if vals else _INT(0)
             return _INT(0)
-        if fn_name == 'swap' and len(args) >= 2:
+        if fn_name == 'swap' and len(args) >= 2 and fn_name not in self.func_defs:
             val_a = copy.deepcopy(args[0])
             val_b = copy.deepcopy(args[1])
             if arg_cursors and len(arg_cursors) >= 2:
@@ -3328,6 +4104,16 @@ class CppInterpreter:
         if fn_name in self.func_defs:
             return self._call_user_function(fn_name, args, line, arg_cursors=arg_cursors)
 
+        # Function pointer: fn_name is a variable holding {'kind': 'funcptr', 'name': f}
+        try:
+            _fptr = self.memory.get_var(fn_name)
+            if isinstance(_fptr, dict) and _fptr.get('kind') == 'funcptr':
+                _real = _fptr.get('name', '')
+                if _real in self.func_defs:
+                    return self._call_user_function(_real, args, line, arg_cursors=arg_cursors)
+        except RuntimeError:
+            pass
+
         return _INT(0)
 
     def _find_arr_from_begin_cursor(self, cursor) -> str | None:
@@ -3496,13 +4282,23 @@ class CppInterpreter:
                 break
 
         if lambda_c is None:
-            # No comparator — natural sort (ascending for ints, lex for pairs)
+            # No comparator — natural sort (ascending for ints, lex for pairs/strings)
             def key_fn(elem):
-                if isinstance(elem, dict) and elem.get('kind') == 'struct':
-                    fields = elem.get('fields', {})
-                    return (self._to_int(fields.get('first', 0)),
-                            self._to_int(fields.get('second', 0)))
-                return self._to_int(elem) if not isinstance(elem, list) else 0
+                if isinstance(elem, dict):
+                    k = elem.get('kind')
+                    if k == 'struct':
+                        fields = elem.get('fields', {})
+                        fk = fields.get('first', _INT(0))
+                        sk = fields.get('second', _INT(0))
+                        # String-keyed pairs (map iteration): sort by string first key
+                        if isinstance(fk, dict) and fk.get('kind') == 'char':
+                            return (fk.get('value', ''), self._to_int(sk))
+                        return (self._to_int(fk), self._to_int(sk))
+                    if k == 'char':
+                        return elem.get('value', '')
+                if isinstance(elem, list):
+                    return 0
+                return self._to_int(elem)
             slice_to_sort.sort(key=key_fn)
         else:
             # Execute lambda to compare two elements
@@ -3636,9 +4432,34 @@ class CppInterpreter:
         caller_fi = len(self.memory.stack) - 2
         ref_wb = self._setup_ref_writeback(params, arg_cursors, caller_fi)
 
-        for param, arg_val in zip(params, args):
+        for _pi, (param, arg_val) in enumerate(zip(params, args)):
             if param.spelling:
+                # Array-to-pointer decay: C-array passed to pointer parameter
+                _pt = param.type.spelling if param.type else ''
+                if (isinstance(arg_val, dict) and arg_val.get('kind') == 'array'
+                        and ('*' in _pt or '[' in _pt)):
+                    _arr_name = ''
+                    if arg_cursors and _pi < len(arg_cursors):
+                        _ac = self._unwrap(arg_cursors[_pi]) or arg_cursors[_pi]
+                        _arr_name = _ac.spelling if _ac else ''
+                    # Embed actual array data so 2D indexing works inside the callee
+                    # (the parameter name shadows the caller's variable, so name-based
+                    # lookup would find the array_ptr itself, not the original array).
+                    arg_val = {'kind': 'array_ptr', 'name': _arr_name, 'idx': 0,
+                               'data': arg_val}
                 self.memory.declare_var(param.spelling, arg_val)
+        # Fill in default arguments for any unprovided params
+        for _pi in range(len(args), len(params)):
+            param = params[_pi]
+            if param.spelling:
+                _pch = [c for c in self._ch(param)
+                        if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
+                if _pch:
+                    _default_val = self._eval(_pch[0])
+                else:
+                    _default_val = self._default_for_type(
+                        param.type.spelling if param.type else '')
+                self.memory.declare_var(param.spelling, _default_val)
 
         ret_val = None
         try:
@@ -3659,19 +4480,101 @@ class CppInterpreter:
                 pass
 
         self._apply_ref_writeback(ref_wb)
+        # Save static local variable values before popping the frame
+        if fn_name in self._static_frame_keys:
+            for svar in self._static_frame_keys[fn_name]:
+                try:
+                    self._static_vars[(fn_name, svar)] = self.memory.get_var(svar)
+                except RuntimeError:
+                    pass
+        # Call destructors for local struct variables (reverse order)
+        self._call_frame_destructors(line)
         self.memory.pop_frame()
         self._emit(line, f"Returning from {fn_name}().",
                    {'type': 'return', 'function': fn_name,
                     'value': self._fmt(ret_val) if ret_val is not None else 'void'})
         return ret_val if ret_val is not None else _INT(0)
 
+    def _dispatch_user_stream_op(self, op_name: str, callee_c, ch: list, line: int):
+        """Dispatch user-defined operator<< / operator>> on class objects.
+        Returns the result dict (with '_self' annotation for chaining) or None if not applicable.
+        """
+        obj_name = None
+        actual = self._unwrap(callee_c) or callee_c if callee_c else None
+        if actual and actual.kind == CK.DECL_REF_EXPR:
+            obj_name = actual.spelling
+        elif callee_c and callee_c.kind == CK.CALL_EXPR and callee_c.spelling in ('operator<<', 'operator>>', ''):
+            inner_r = self._eval(callee_c)
+            if isinstance(inner_r, dict) and '_self' in inner_r:
+                obj_name = inner_r['_self']
+        if not obj_name:
+            return None
+        try: _ov = self.memory.get_var(obj_name)
+        except: return None
+        if not (isinstance(_ov, dict) and _ov.get('kind') == 'struct'):
+            return None
+        _cn = _ov.get('class', '')
+        if not _cn or _cn not in self.class_defs:
+            return None
+        if op_name not in self.class_defs[_cn].get('methods', {}):
+            return None
+        real_c = [c for c in ch[1:]
+                  if not (c.kind == CK.UNEXPOSED_EXPR and c.spelling in ('operator<<', 'operator>>'))]
+        _res = self._call_method_on_stack(_cn, obj_name, None, op_name,
+                                          [self._eval(c) for c in real_c], line,
+                                          arg_cursors=real_c)
+        if isinstance(_res, dict):
+            return {**_res, '_self': obj_name}
+        return {'kind': 'int', 'value': self._to_int(_res), '_self': obj_name}
+
+    def _call_frame_destructors(self, line: int):
+        """Call destructors for local struct variables in the top frame (reverse order)."""
+        if not self.memory.stack:
+            return
+        frame = self.memory.stack[-1]
+        # Collect names of stack vars that are user-defined struct/class instances
+        dtor_vars = []
+        for var_name, val in frame['variables'].items():
+            if not isinstance(val, dict) or val.get('kind') != 'struct':
+                continue
+            class_name = val.get('class', '')
+            if not class_name or class_name not in self.class_defs:
+                continue
+            cd = self.class_defs[class_name]
+            dtor_name = '~' + class_name
+            if dtor_name in cd.get('methods', {}):
+                dtor_vars.append((var_name, class_name))
+        for var_name, class_name in reversed(dtor_vars):
+            try:
+                self._call_method_on_stack(class_name, var_name, None, '~' + class_name, [], line)
+            except Exception:
+                pass
+
+    def _resolve_virtual_method(self, static_class: str, obj_class: str, method_name: str):
+        """Return (class_name, method_cursor) for virtual dispatch."""
+        # If the actual runtime class has the method, prefer it (virtual dispatch)
+        if obj_class and obj_class in self.class_defs:
+            _ocd = self.class_defs[obj_class]
+            if method_name in _ocd['methods']:
+                return obj_class, _ocd['methods'][method_name]
+            # Walk up the inheritance chain of the actual class
+            for _base in _ocd.get('bases', []):
+                if _base in self.class_defs and method_name in self.class_defs[_base]['methods']:
+                    return _base, self.class_defs[_base]['methods'][method_name]
+        # Fall back to static class
+        if static_class in self.class_defs:
+            _scd = self.class_defs[static_class]
+            if method_name in _scd['methods']:
+                return static_class, _scd['methods'][method_name]
+            for _base in _scd.get('bases', []):
+                if _base in self.class_defs and method_name in self.class_defs[_base]['methods']:
+                    return _base, self.class_defs[_base]['methods'][method_name]
+        return None, None
+
     def _call_method_on_stack(self, class_name: str, obj_name: str, obj_c,
                               method_name: str, args: list, line: int,
                               arg_cursors=None) -> dict:
         if class_name not in self.class_defs:
-            return _INT(0)
-        cd = self.class_defs[class_name]
-        if method_name not in cd['methods']:
             return _INT(0)
 
         # Find the frame containing obj_name
@@ -3683,11 +4586,18 @@ class CppInterpreter:
         if frame_idx is None:
             return _INT(0)
 
+        # Virtual dispatch: get actual runtime class from the object's value
+        obj_val = self.memory.stack[frame_idx]['variables'].get(obj_name, {})
+        actual_class = obj_val.get('class', class_name) if isinstance(obj_val, dict) else class_name
+        resolved_class, method_cursor = self._resolve_virtual_method(class_name, actual_class, method_name)
+        if method_cursor is None:
+            return _INT(0)
+
         binding = _ThisBinding('stack', frame_idx=frame_idx, var_name=obj_name,
-                               class_name=class_name)
+                               class_name=resolved_class)
         self._this_stack.append(binding)
-        result = self._call_method_body(class_name, method_name,
-                                        cd['methods'][method_name], args, line,
+        result = self._call_method_body(resolved_class, method_name,
+                                        method_cursor, args, line,
                                         arg_cursors=arg_cursors)
         self._this_stack.pop()
         return result
@@ -3720,11 +4630,19 @@ class CppInterpreter:
         class_name = self._binding_class_name(binding)
         if not class_name or class_name not in self.class_defs:
             return _INT(0)
-        cd = self.class_defs[class_name]
-        if method_name not in cd['methods']:
+        # Get actual runtime class for virtual dispatch
+        actual_class = class_name
+        if binding.kind == 'stack' and binding.frame_idx is not None:
+            _ov = self.memory.stack[binding.frame_idx]['variables'].get(binding.var_name, {})
+            if isinstance(_ov, dict):
+                actual_class = _ov.get('class', class_name)
+        elif binding.kind == 'heap' and binding.addr in self.memory.heap:
+            _ov = self.memory.heap[binding.addr].get('fields', {})
+        resolved_class, method_cursor = self._resolve_virtual_method(class_name, actual_class, method_name)
+        if method_cursor is None:
             return _INT(0)
-        return self._call_method_body(class_name, method_name,
-                                      cd['methods'][method_name], args, line,
+        return self._call_method_body(resolved_class, method_name,
+                                      method_cursor, args, line,
                                       arg_cursors=arg_cursors)
 
     def _call_method_body(self, class_name: str, method_name: str,
@@ -3760,8 +4678,13 @@ class CppInterpreter:
 
     def _init_class_on_stack(self, class_name: str, children: list, line: int) -> dict:
         cd     = self.class_defs[class_name]
-        fields = {f: self._default_for_type(t) for f, t in cd['fields'].items()}
-        obj    = {'kind': 'struct', 'fields': fields}
+        fields = {}
+        for base in cd.get('bases', []):
+            if base in self.class_defs:
+                fields.update({f: self._default_for_type(t)
+                                for f, t in self.class_defs[base]['fields'].items()})
+        fields.update({f: self._default_for_type(t) for f, t in cd['fields'].items()})
+        obj    = {'kind': 'struct', 'fields': fields, 'class': class_name}
 
         def _find_user_call(cursor, depth=0):
             """Recursively find a CALL_EXPR for a user-defined function."""
@@ -3775,6 +4698,34 @@ class CppInterpreter:
                     return found
             return None
 
+        # ── Aggregate initialization: Student s = {"Alice", 90, d} ──────────
+        # Also handles designated initializers: Student s = {.name="Sid", .marks=40}
+        for c in children:
+            if c.kind == CK.INIT_LIST_EXPR:
+                il_ch = self._ch(c)
+                field_names = list(cd['fields'].keys())
+                # Check if these are designated initializers (UNEXPOSED_EXPR with MEMBER_REF child)
+                if il_ch and il_ch[0].kind == CK.UNEXPOSED_EXPR:
+                    sub_ch = self._ch(il_ch[0])
+                    if sub_ch and sub_ch[0].kind == CK.MEMBER_REF:
+                        # Designated initializers: {.field=val, ...}
+                        for entry in il_ch:
+                            entry_ch = self._ch(entry)
+                            if entry_ch and entry_ch[0].kind == CK.MEMBER_REF:
+                                fname = entry_ch[0].spelling
+                                fval = self._eval(entry_ch[1]) if len(entry_ch) > 1 else _INT(0)
+                                if fname in obj['fields']:
+                                    obj['fields'][fname] = fval
+                        return obj
+                # Plain aggregate: {val1, val2, ...}
+                for fi, val_c in enumerate(il_ch):
+                    if fi >= len(field_names):
+                        break
+                    fname = field_names[fi]
+                    fval = self._eval(val_c)
+                    obj['fields'][fname] = fval
+                return obj
+
         # Find constructor args — VAR_DECL children: TYPE_REF + CALL_EXPR(ctor name, args...)
         ctor_args = []
         for c in children:
@@ -3785,6 +4736,11 @@ class CppInterpreter:
                 ctor_args = [self._eval(a) for a in self._ch(actual)
                              if a.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF)]
                 break
+            # Any CALL_EXPR (e.g. operator+, factory function) that produces a struct → use directly
+            if actual.kind == CK.CALL_EXPR and actual.spelling != class_name:
+                result = self._eval(actual)
+                if isinstance(result, dict) and result.get('kind') == 'struct':
+                    return result
             # User function returning a class value (e.g. Matrix R = mat_mul(...))
             # May be wrapped in CXX_CONSTRUCT_EXPR for copy ctor — search recursively
             user_call = _find_user_call(c)
@@ -3799,14 +4755,45 @@ class CppInterpreter:
                              if a.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF,
                                                CK.MEMBER_REF_EXPR, CK.DECL_REF_EXPR)]
 
+        # Implicit copy: T x = other_T where T has no user-defined constructors
+        if (not cd['ctors'] and len(ctor_args) == 1
+                and isinstance(ctor_args[0], dict)
+                and ctor_args[0].get('kind') == 'struct'):
+            return copy.deepcopy(ctor_args[0])
+
         if cd['ctors']:
-            obj = self._run_ctor_on_stack_val(class_name, obj, cd['ctors'][0], ctor_args, line)
+            # Pick the right constructor: copy ctor if arg is same-class struct
+            _ctor = cd['ctors'][0]
+            if (len(ctor_args) == 1 and isinstance(ctor_args[0], dict)
+                    and ctor_args[0].get('kind') == 'struct'
+                    and ctor_args[0].get('class') == class_name):
+                _cc = self._find_copy_ctor(class_name)
+                if _cc:
+                    _ctor = _cc
+            obj = self._run_ctor_on_stack_val(class_name, obj, _ctor, ctor_args, line)
         return obj
+
+    def _find_copy_ctor(self, class_name: str):
+        """Return the copy constructor cursor if present, else None."""
+        cd = self.class_defs.get(class_name, {})
+        for ctor in cd.get('ctors', []):
+            params = self._get_params(ctor)
+            if len(params) == 1:
+                pt = params[0].type.spelling if params[0].type else ''
+                if '&' in pt and class_name in pt:
+                    return ctor
+        return None
 
     def _build_class_value(self, class_name: str, args: list, line: int) -> dict:
         cd     = self.class_defs[class_name]
-        fields = {f: self._default_for_type(t) for f, t in cd['fields'].items()}
-        obj    = {'kind': 'struct', 'fields': fields}
+        fields = {}
+        # Include inherited fields from base classes
+        for base in cd.get('bases', []):
+            if base in self.class_defs:
+                fields.update({f: self._default_for_type(t)
+                                for f, t in self.class_defs[base]['fields'].items()})
+        fields.update({f: self._default_for_type(t) for f, t in cd['fields'].items()})
+        obj    = {'kind': 'struct', 'fields': fields, 'class': class_name}
         if cd['ctors']:
             obj = self._run_ctor_on_stack_val(class_name, obj, cd['ctors'][0], args, line)
         return obj
@@ -3823,7 +4810,26 @@ class CppInterpreter:
 
         # Initialiser list: pairs of MEMBER_REF + value_cursor
         # Filter PARM_DECL — libclang puts ctor params at index 0 before the init pairs
-        init_items = [c for c in init_ch if c.kind != CK.PARM_DECL]
+        _skip_kinds = (CK.PARM_DECL, CK.TEMPLATE_TYPE_PARAMETER, CK.TEMPLATE_REF,
+                       CK.NAMESPACE_REF, CK.TYPE_REF)
+        _raw = [c for c in init_ch if c.kind not in _skip_kinds]
+        # Re-insert TYPE_REF items that immediately precede a CALL_EXPR (base class init)
+        init_items = []
+        _ric = [c for c in init_ch if c.kind not in (
+            CK.PARM_DECL, CK.TEMPLATE_TYPE_PARAMETER, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
+        _i2 = 0
+        while _i2 < len(_ric):
+            c = _ric[_i2]
+            if (c.kind == CK.TYPE_REF and _i2 + 1 < len(_ric)
+                    and _ric[_i2 + 1].kind == CK.CALL_EXPR):
+                init_items.append(c)      # keep base-class TYPE_REF + CALL_EXPR
+                init_items.append(_ric[_i2 + 1])
+                _i2 += 2
+            elif c.kind == CK.TYPE_REF:
+                _i2 += 1                  # skip lone TYPE_REF (template type)
+            else:
+                init_items.append(c)
+                _i2 += 1
         i = 0
         while i + 1 < len(init_items):
             field_c = init_items[i]
@@ -3837,6 +4843,21 @@ class CppInterpreter:
                 val = self._eval(val_expr)
                 self.memory.stack.pop()
                 obj['fields'][field_name] = val
+            elif field_c.kind == CK.TYPE_REF and val_c.kind == CK.CALL_EXPR:
+                # Base class constructor call: Animal(n)
+                base_cls = field_c.spelling.replace('class ', '').replace('struct ', '').strip()
+                if base_cls in self.class_defs:
+                    pmap = {p.spelling: a for p, a in zip(params, args) if p.spelling}
+                    self.memory.stack.append({'function': '__init', 'line': line, 'variables': pmap})
+                    base_args = [self._eval(a) for a in self._ch(val_c)
+                                 if a.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF)]
+                    self.memory.stack.pop()
+                    base_cd = self.class_defs[base_cls]
+                    base_fields = {f: self._default_for_type(t) for f, t in base_cd['fields'].items()}
+                    base_obj = {'kind': 'struct', 'fields': base_fields, 'class': base_cls}
+                    if base_cd['ctors']:
+                        base_obj = self._run_ctor_on_stack_val(base_cls, base_obj, base_cd['ctors'][0], base_args, line)
+                    obj['fields'].update(base_obj['fields'])
             i += 2
 
 
@@ -3872,7 +4893,26 @@ class CppInterpreter:
         params   = self._get_params(ctor_cursor)
 
         # Initialiser list — filter PARM_DECL before iterating pairs
-        init_items = [c for c in init_ch if c.kind != CK.PARM_DECL]
+        _skip_kinds = (CK.PARM_DECL, CK.TEMPLATE_TYPE_PARAMETER, CK.TEMPLATE_REF,
+                       CK.NAMESPACE_REF, CK.TYPE_REF)
+        _raw = [c for c in init_ch if c.kind not in _skip_kinds]
+        # Re-insert TYPE_REF items that immediately precede a CALL_EXPR (base class init)
+        init_items = []
+        _ric = [c for c in init_ch if c.kind not in (
+            CK.PARM_DECL, CK.TEMPLATE_TYPE_PARAMETER, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
+        _i2 = 0
+        while _i2 < len(_ric):
+            c = _ric[_i2]
+            if (c.kind == CK.TYPE_REF and _i2 + 1 < len(_ric)
+                    and _ric[_i2 + 1].kind == CK.CALL_EXPR):
+                init_items.append(c)      # keep base-class TYPE_REF + CALL_EXPR
+                init_items.append(_ric[_i2 + 1])
+                _i2 += 2
+            elif c.kind == CK.TYPE_REF:
+                _i2 += 1                  # skip lone TYPE_REF (template type)
+            else:
+                init_items.append(c)
+                _i2 += 1
         i = 0
         while i + 1 < len(init_items):
             field_c = init_items[i]
@@ -4777,24 +5817,33 @@ class CppInterpreter:
             return _INT(len(data))
         if method_name == 'empty':
             return _INT(int(len(data) == 0))
-        if method_name == 'count':
+        if method_name in ('count', 'contains'):
             key = self._make_map_key(args[0]) if args else '0'
             if isinstance(data, dict):
                 return _INT(1 if key in data else 0)
             return _INT(1 if any(_ekey(e) == key for e in data) else 0)
         if method_name == 'insert':
             val = args[0] if args else _INT(0)
+            # Unwrap pair<K,V>: insert(make_pair(k, v)) → data[k] = v
+            _pair_key = None; _pair_val = val
+            if (isinstance(val, dict) and val.get('kind') == 'struct'):
+                _f = val.get('fields', {})
+                if 'first' in _f and 'second' in _f:
+                    _pair_key = self._make_map_key(_f['first'])
+                    _pair_val = _f['second']
             if isinstance(data, list):
-                key = self._make_map_key(val)
+                key = _pair_key if _pair_key is not None else self._make_map_key(val)
+                ins_val = _pair_val if _pair_key is not None else val
                 if not any(_ekey(e) == key for e in data):
-                    data.append({'key': key, 'val': val})
+                    data.append({'key': key, 'val': ins_val})
                     data.sort(key=lambda e: self._set_sort_key(_ekey(e)))
                 col['data'] = data
                 save()
             elif isinstance(data, dict):
-                key = self._make_map_key(val)
+                key = _pair_key if _pair_key is not None else self._make_map_key(val)
+                ins_val = _pair_val if _pair_key is not None else val
                 if key not in data:
-                    data[key] = val
+                    data[key] = ins_val
                 save()
             self.memory.update_line(line)
             self._emit(line, f"{real_name}.insert({self._fmt(val)}).",
@@ -4854,6 +5903,15 @@ class CppInterpreter:
                 if method_name == 'upper_bound' and ev > target:
                     return _mk_iter(i)
             return _end_iter()
+        if method_name == 'at' and isinstance(data, dict):
+            key = self._make_map_key(args[0]) if args else '0'
+            return data.get(key, _INT(0))
+        if method_name in ('operator[]',) and isinstance(data, dict):
+            key = self._make_map_key(args[0]) if args else '0'
+            if key not in data:
+                data[key] = _INT(0)
+                save()
+            return data.get(key, _INT(0))
         return _INT(0)
 
     def _call_string_method(self, obj_name: str, obj_c, method_name: str,
@@ -5097,11 +6155,13 @@ class CppInterpreter:
                 # Start empty; extends lazily on write
                 return {'kind': 'array', 'values': [], 'declared_size': size}
             cap  = min(size, _LAZY_THRESHOLD)
-            vals = [0] * cap
+            is_char_arr = type_spell.lower().startswith('char')
+            vals = [{'kind': 'char', 'value': '\0'} if is_char_arr else 0] * cap
             if has_init:
                 for ci, e in enumerate(self._ch(init_c)):
                     if ci < cap:
-                        vals[ci] = self._to_int(self._eval(e))
+                        v = self._eval(e)
+                        vals[ci] = v if is_char_arr else self._to_int(v)
             return {'kind': 'array', 'values': vals, 'declared_size': size}
 
         return {'kind': 'array', 'values': []}
@@ -5129,16 +6189,23 @@ class CppInterpreter:
         l_end  = left.extent.end.offset
         r_start = right.extent.start.offset
 
+        # Alternative-token keywords map (C++ ISO alternative representations)
+        _alt_kw = {'and': '&&', 'or': '||', 'not_eq': '!=',
+                   'bitand': '&', 'bitor': '|', 'xor': '^'}
+
         # Scan tokens strictly between the two children
         for tok in cursor.get_tokens():
             ts = tok.extent.start.offset
             te = tok.extent.end.offset
-            if ts >= l_end and te <= r_start and tok.kind == TK.PUNCTUATION:
-                sp = tok.spelling
-                if sp not in ('(', ')', '[', ']', '{', '}', ',', ';', '...'):
-                    return sp
+            if ts >= l_end and te <= r_start:
+                if tok.kind == TK.PUNCTUATION:
+                    sp = tok.spelling
+                    if sp not in ('(', ')', '[', ']', '{', '}', ',', ';', '...'):
+                        return sp
+                elif tok.kind == TK.KEYWORD and tok.spelling in _alt_kw:
+                    return _alt_kw[tok.spelling]
 
-        # Fallback: first punctuation token not in either child's range
+        # Fallback: first punctuation/keyword-op token not in either child's range
         l_range = (left.extent.start.offset,  left.extent.end.offset)
         r_range = (right.extent.start.offset, right.extent.end.offset)
         for tok in cursor.get_tokens():
@@ -5149,6 +6216,8 @@ class CppInterpreter:
                 sp = tok.spelling
                 if sp not in ('(', ')', '[', ']', '{', '}', ',', ';', '...'):
                     return sp
+            elif tok.kind == TK.KEYWORD and tok.spelling in _alt_kw:
+                return _alt_kw[tok.spelling]
         return '+'
 
     def _get_unary_op(self, cursor) -> str:
@@ -5225,8 +6294,16 @@ class CppInterpreter:
         s = (type_spell
              .replace('const ', '').replace('volatile ', '')
              .replace('*', '').replace('&', '').strip())
+        # Strip array dimensions: "Student [3]" → "Student", "int [3][3]" → "int"
+        bracket = s.find('[')
+        if bracket != -1:
+            s = s[:bracket].strip()
         if s.startswith('std::'):
             s = s[5:]
+        # Strip template params: 'MyStack<int>' → 'MyStack'
+        bracket = s.find('<')
+        if bracket != -1:
+            s = s[:bracket].strip()
         return s
 
     def _is_vector_type(self, type_spell: str) -> bool:
@@ -5274,7 +6351,7 @@ class CppInterpreter:
         if any(t in ts for t in ('int', 'long', 'short', 'unsigned',
                                   'size_t', 'bool', 'float', 'double')):
             return _INT(0)
-        if 'char' in ts:
+        if 'char' in ts or ts in ('string', 'std::string'):
             return {'kind': 'char', 'value': ''}
         if '*' in type_spell:
             return {'kind': 'pointer', 'address': None}
@@ -5317,18 +6394,21 @@ class CppInterpreter:
         if isinstance(val, dict):
             k = val.get('kind')
             if k == 'int':     return val.get('value', 0) != 0
+            if k == 'float':   return val.get('value', 0.0) != 0.0
             if k == 'pointer': return val.get('address') is not None
             if k == 'char':    return val.get('value', '') not in ('', '\0')
             if k == 'array':   return True
             if k == 'struct':  return True
         return bool(val)
 
-    def _to_int(self, val) -> int:
+    def _to_int(self, val):
+        """Return the numeric value of val (may be int or float)."""
         if val is None:                    return 0
-        if isinstance(val, (int, float)):  return int(val)
+        if isinstance(val, (int, float)):  return val
         if isinstance(val, dict):
             k = val.get('kind')
             if k == 'int':     return val.get('value', 0)
+            if k == 'float':   return val.get('value', 0.0)
             if k == 'pointer': return 0 if val.get('address') is None else 1
             if k == 'char':
                 v = val.get('value', '')
@@ -5339,7 +6419,7 @@ class CppInterpreter:
                 return ord(v[0]) if v else 0
             if k == 'map':      return len(val.get('data', {}))
             if k == 'array':    return len(val.get('values', []))
-            if k == 'iterator': return 0 if val.get('idx') is None else 1
+            if k == 'iterator': return val.get('idx', 0) if val.get('idx') is not None else 0
         return 0
 
     def _pointer_advance(self, ptr: dict, delta: int, line: int) -> dict:
@@ -5425,8 +6505,8 @@ class CppInterpreter:
         Preserves pointer/struct dicts; coerces scalars to int.
         Sets lastWrite, returns the stored value (for emit messages).
         Raises crash on out-of-bounds if line is provided."""
-        # Preserve pointer and struct dicts as-is; coerce everything else to int
-        is_rich = isinstance(val, dict) and val.get('kind') not in ('int', 'char')
+        # Preserve pointer, struct, and single-char dicts as-is; coerce everything else to int
+        is_rich = isinstance(val, dict) and val.get('kind') not in ('int',)
         store_val = val if is_rich else self._to_int(val)
         coerced   = self._to_int(val)   # for emit / return compat
         vals = arr.get('values', [])
@@ -5491,6 +6571,7 @@ class CppInterpreter:
         if isinstance(val, dict):
             k = val.get('kind')
             if k == 'int':      return str(val.get('value', 0))
+            if k == 'float':    return f"{val.get('value', 0.0):.6g}"
             if k == 'pointer':  return val.get('address') or 'nullptr'
             if k == 'char':     return f"'{val.get('value', '')}'"
             if k == 'struct':   return '{...}'
@@ -5691,6 +6772,16 @@ class CppInterpreter:
         if isinstance(val, dict):
             k = val.get('kind')
             if k == 'int':     return str(val.get('value', 0))
+            if k == 'float':
+                v = val.get('value', 0.0)
+                prec = self._output_precision
+                if self._output_fixed and prec >= 0:
+                    return f"{v:.{prec}f}"
+                if self._output_fixed:
+                    return f"{v:.6f}"
+                if prec >= 0:
+                    return f"{v:.{prec}g}"
+                return f"{v:.6g}"
             if k == 'char':    return val.get('value', '')
             if k == 'pointer': return val.get('address') or 'NULL'
             if k == 'array':   return str(val.get('values', []))
@@ -5709,3 +6800,10 @@ class CppInterpreter:
 
 def _INT(v: int) -> dict:
     return {'kind': 'int', 'value': v}
+
+def _FLOAT(v: float) -> dict:
+    return {'kind': 'float', 'value': float(v)}
+
+def _is_float_val(v) -> bool:
+    """True if v is a float-kind dict."""
+    return isinstance(v, dict) and v.get('kind') == 'float'
