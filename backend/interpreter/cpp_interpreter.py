@@ -1321,6 +1321,22 @@ class CppInterpreter:
                 # Reuse _eval_call since it reads children via _ch() the same way.
                 if callee_c.kind == CK.MEMBER_REF_EXPR:
                     return self._eval_call(cursor)
+                # Template-dependent iterator/pointer arithmetic:
+                # UNEXPOSED_EXPR[iter_or_ptr_expr, int_offset] represents
+                # e.g. a.begin()+l or a.end()-2 when types are dependent.
+                if len(ch) == 2:
+                    _lv = self._eval(ch[0])
+                    if isinstance(_lv, dict) and _lv.get('kind') in ('iterator', 'array_ptr'):
+                        _rv = self._eval(ch[1])
+                        # Determine +/- by scanning tokens outside parentheses/brackets
+                        _op, _dep = '+', 0
+                        for _t in [_tt.spelling for _tt in cursor.get_tokens()]:
+                            if _t in ('(', '['):  _dep += 1
+                            elif _t in (')', ']'): _dep -= 1
+                            elif _dep == 0 and _t == '+': _op = '+'; break
+                            elif _dep == 0 and _t == '-': _op = '-'; break
+                        _n = int(self._to_int(_rv))
+                        return {**_lv, 'idx': (_lv.get('idx') or 0) + (_n if _op == '+' else -_n)}
             # Cast expressions: (ll)x or string("foo") — skip TYPE_REF/TEMPLATE_REF wrapper
             if k in (CK.CSTYLE_CAST_EXPR, CK.CXX_FUNCTIONAL_CAST_EXPR) and ch[0].kind in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF):
                 non_tr = [c for c in ch if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
@@ -1622,6 +1638,18 @@ class CppInterpreter:
             n = int(self._to_int(l))
             arr_name = ch[1].spelling if len(ch) > 1 else ''
             return {'kind': 'array_ptr', 'name': arr_name, 'idx': n}
+
+        # Iterator arithmetic: iter + n, iter - n (random-access advance)
+        if isinstance(l, dict) and l.get('kind') == 'iterator' and op in ('+', '-'):
+            if not (isinstance(r, dict) and r.get('kind') == 'iterator'):
+                n = int(self._to_int(r))
+                new_idx = (l.get('idx') or 0) + (n if op == '+' else -n)
+                return {**l, 'idx': new_idx}
+        if isinstance(r, dict) and r.get('kind') == 'iterator' and op == '+':
+            if not (isinstance(l, dict) and l.get('kind') == 'iterator'):
+                n = int(self._to_int(l))
+                new_idx = (r.get('idx') or 0) + n
+                return {**r, 'idx': new_idx}
 
         # Iterator comparison: compare idx directly (None = end sentinel)
         if (isinstance(l, dict) and l.get('kind') == 'iterator' and
@@ -3485,7 +3513,12 @@ class CppInterpreter:
                 self._write_lval(arg_cursors[1], val_a, line)
             return _INT(0)
         if fn_name in ('sort', 'std::sort', 'stable_sort') and arg_cursors:
-            return self._sort_with_comparator(fn_name, arg_cursors, line)
+            # Only treat as std::sort if the user hasn't defined their own function
+            # with the same name and different signature (e.g. sort(arr, l, r)).
+            if fn_name == 'sort' and fn_name in self.func_defs:
+                pass  # fall through to user-defined sort below
+            else:
+                return self._sort_with_comparator(fn_name, arg_cursors, line)
         if fn_name in ('reverse', 'std::reverse') and arg_cursors:
             arr_name = self._find_arr_from_begin_cursor(arg_cursors[0])
             if arr_name:
@@ -4945,13 +4978,22 @@ class CppInterpreter:
     def _init_vector(self, type_spell: str, children: list, line: int) -> dict:
         is_2d = type_spell.count('vector') > 1
 
-        # Filter out TYPE_REF / TEMPLATE_REF, then unwrap remaining children
+        # Filter out TYPE_REF / TEMPLATE_REF, keep remaining children as-is
         real_args = []
         for c in children:
-            if c.kind in (CK.TYPE_REF, CK.TEMPLATE_REF):
+            if c.kind in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF):
                 continue
-            uw = self._unwrap(c)
-            real_args.append(uw if uw else c)
+            real_args.append(c)
+
+        # Flatten ctor-args wrapper: vector<int>(begin+l, begin+m+1) creates
+        # VAR_DECL → [TEMPLATE_REF, UNEXPOSED_EXPR(t='', [arg1, arg2])]
+        # The outer UNEXPOSED_EXPR has empty type and wraps all constructor arguments.
+        if (len(real_args) == 1 and real_args[0].kind == CK.UNEXPOSED_EXPR and
+                real_args[0].type.spelling == ''):
+            sub = [c for c in self._ch(real_args[0])
+                   if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
+            if len(sub) >= 2:
+                real_args = sub
 
         # ── Copy constructor: vector(another_vector) → deep copy ──
         # libclang wraps `return dist` (where dist is vector<T>) in a copy constructor
@@ -5013,6 +5055,20 @@ class CppInterpreter:
                     'values': [[init_val] * m for _ in range(n)],
                     'rows': n, 'cols': m}
         else:
+            # Iterator range constructor: vector<T>(begin_iter, end_iter)
+            # e.g. vector<int> L(a.begin()+l, a.begin()+m+1)
+            if len(real_args) == 2:
+                begin_val = self._eval(real_args[0])
+                end_val   = self._eval(real_args[1])
+                if (isinstance(begin_val, dict) and begin_val.get('kind') == 'iterator' and
+                        isinstance(end_val,   dict) and end_val.get('kind')   == 'iterator'):
+                    data      = begin_val.get('data', [])
+                    start_idx = begin_val.get('idx') or 0
+                    end_idx   = end_val.get('idx')
+                    if end_idx is None:
+                        end_idx = len(data)
+                    sliced = list(data[start_idx:end_idx])
+                    return {'kind': 'array', 'values': sliced}
             n        = self._to_int(self._eval(real_args[0])) if real_args else 0
             init_val = self._to_int(self._eval(real_args[1])) if len(real_args) > 1 else 0
             return {'kind': 'array', 'values': [init_val] * n}
