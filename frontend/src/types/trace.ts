@@ -2,10 +2,11 @@ export type SetEntry = { key: string; val: VariableValue };
 
 export type VariableValue =
   | { kind: 'int';      value: number }
+  | { kind: 'float';    value: number }
   | { kind: 'char';     value: string }
   | { kind: 'pointer';  address: string | null }
   | { kind: 'struct';   fields: Record<string, VariableValue> }
-  | { kind: 'array';    values: number[] | number[][] | VariableValue[]; rows?: number; cols?: number; lastWrite?: number[]; ctype?: string }
+  | { kind: 'array';    values: number[] | number[][] | VariableValue[]; rows?: number; cols?: number; lastWrite?: number[]; ctype?: string; min_heap?: boolean }
   | { kind: 'set';      data: SetEntry[] }
   | { kind: 'multiset'; data: SetEntry[] }
   | { kind: 'map';      data: Record<string, VariableValue> }

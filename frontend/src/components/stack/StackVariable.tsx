@@ -6,13 +6,19 @@ import { useRefRegistry } from '../../contexts/refRegistry';
 function displayValue(v: VariableValue): string {
   if (v.kind === 'pointer') return v.address ?? 'NULL';
   if (v.kind === 'int')     return String(v.value);
-  if (v.kind === 'char')    return `'${v.value}'`;
+  if (v.kind === 'float')   return String(v.value);
+  if (v.kind === 'char')    return v.value.length === 1 ? `'${v.value}'` : `"${v.value}"`;
   if (v.kind === 'struct') {
-    const f = v.fields.first  as VariableValue | undefined;
-    const s = v.fields.second as VariableValue | undefined;
-    if (f !== undefined && s !== undefined)
-      return `(${displayValue(f)}, ${displayValue(s)})`;
-    return '{…}';
+    const { fields } = v;
+    const entries = Object.entries(fields);
+    // std::pair
+    if ('first' in fields && 'second' in fields && entries.length === 2)
+      return `(${displayValue(fields.first)}, ${displayValue(fields.second)})`;
+    // General struct: show up to 3 fields as key:value
+    const parts = entries
+      .slice(0, 3)
+      .map(([k, fv]) => `${k}:${displayValue(fv)}`);
+    return `{${parts.join(', ')}${entries.length > 3 ? ', …' : ''}}`;
   }
   if (v.kind === 'array') return `[${v.values.length}]`;
   if (v.kind === 'set' || v.kind === 'multiset') return `{${v.data.length}}`;

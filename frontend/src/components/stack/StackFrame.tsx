@@ -160,11 +160,31 @@ export default function StackFrameComponent({
           if (val.kind === 'iterator') {
             return null; // iterators are impl-detail variables; skip display
           }
+          if (val.kind === 'struct') {
+            // Render struct as an expandable group: name on top, fields indented below
+            return (
+              <div key={name} className="px-1 py-0.5">
+                <div className="text-zinc-500 text-[10px] font-mono px-1 mb-0.5">{name}</div>
+                <div
+                  className="ml-2 pl-2 space-y-0.5"
+                  style={{ borderLeft: '1px solid rgba(99,102,241,0.2)' }}
+                >
+                  {Object.entries(val.fields).map(([fieldName, fieldVal]) => (
+                    <StackVariable
+                      key={fieldName}
+                      frameName={frame.function}
+                      name={`${name}.${fieldName}`}
+                      value={fieldVal}
+                      changed={hasChanged(name, val)}
+                    />
+                  ))}
+                </div>
+              </div>
+            );
+          }
           if (val.kind === 'array') {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const ctype: string = (val as any).ctype ?? '';
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const isMinHeap: boolean = (val as any).min_heap ?? false;
+            const ctype: string = val.ctype ?? '';
+            const isMinHeap: boolean = val.min_heap ?? false;
             const isPQ    = ctype.includes('priority_queue');
             const isStack = ctype.includes('stack') && !ctype.includes('priority');
             const isQueue = ctype.includes('queue') || ctype.includes('deque');

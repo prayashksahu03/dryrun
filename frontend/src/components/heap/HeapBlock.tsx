@@ -12,8 +12,19 @@ function FieldDisplay({ value }: { value: VariableValue }) {
       </span>
     );
   }
-  if (value.kind === 'int') return <span className="text-amber-400">{value.value}</span>;
-  if (value.kind === 'char') return <span className="text-green-400">'{value.value}'</span>;
+  if (value.kind === 'int')   return <span className="text-amber-400">{value.value}</span>;
+  if (value.kind === 'float') return <span className="text-amber-400">{value.value}</span>;
+  if (value.kind === 'char')  return <span className="text-green-400">'{value.value}'</span>;
+  if (value.kind === 'array') return <span className="text-zinc-400">[{value.values.length}]</span>;
+  if (value.kind === 'struct') {
+    const entries = Object.entries(value.fields).slice(0, 2);
+    const parts = entries.map(([k, fv]) => {
+      const v = fv.kind === 'int' || fv.kind === 'float' ? fv.value
+              : fv.kind === 'char' ? `'${fv.value}'` : '…';
+      return `${k}:${v}`;
+    });
+    return <span className="text-zinc-300">{`{${parts.join(', ')}}`}</span>;
+  }
   return <span className="text-zinc-600">?</span>;
 }
 
