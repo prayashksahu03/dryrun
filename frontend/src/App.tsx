@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Analytics } from '@vercel/analytics/react';
 import { useExecutionStore } from './store/executionStore';
 import { useKeyboardNav } from './hooks/useKeyboardNav';
 import CodePanel from './components/CodePanel';
@@ -212,6 +213,7 @@ export default function App() {
 
       <TimelineBar />
       <AmbiguityPanel />
+      <Analytics />
     </div>
   );
 }
