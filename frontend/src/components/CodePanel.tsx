@@ -1,5 +1,7 @@
 import { useRef, useEffect, useState } from 'react';
 import { useExecutionStore, Language } from '../store/executionStore';
+import { useFeedbackGate } from '../hooks/useFeedbackGate';
+import FeedbackGateModal from './FeedbackGateModal';
 
 // ── Syntax highlighting ───────────────────────────────────────────────
 
@@ -102,6 +104,13 @@ function EditorMode() {
   const errorLine   = error ? parseErrorLine(error) : null;
   const errorType   = error ? parseErrorType(error) : null;
 
+  const { gateOpen, attemptRun, onFeedbackSubmitted } = useFeedbackGate();
+
+  const handleRun = () => {
+    if (!attemptRun()) return;
+    runCode();
+  };
+
   const frame       = currentFrame();
   const currentLine = frame?.line ?? -1;
   const isCrash     = frame?.event.type === 'crash';
@@ -116,7 +125,7 @@ function EditorMode() {
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
       e.preventDefault();
-      runCode();
+      handleRun();
     }
     if (e.key === 'Tab') {
       e.preventDefault();
@@ -148,7 +157,7 @@ function EditorMode() {
         <div className="flex items-center gap-2">
           <button
             data-tour="run-button"
-            onClick={runCode}
+            onClick={handleRun}
             disabled={isLoading}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-mono font-medium transition-all ${
               isLoading
@@ -277,6 +286,9 @@ function EditorMode() {
           )}
         </div>
       )}
+
+      {/* Feedback gate modal */}
+      {gateOpen && <FeedbackGateModal onSubmitted={onFeedbackSubmitted} />}
 
       {/* Bottom bar: frame description (trace) | error | hint */}
       {trace ? (
