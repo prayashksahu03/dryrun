@@ -14,18 +14,31 @@ function isTallySubmission(e: MessageEvent): boolean {
 
 export default function FeedbackGateModal({ onSubmitted }: { onSubmitted: () => void }) {
   const [submitted, setSubmitted] = useState(false);
+  const [canConfirm, setCanConfirm] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
+  // Auto-close if Tally fires postMessage (best case)
   useEffect(() => {
     const handler = (e: MessageEvent) => {
       if (isTallySubmission(e)) {
         setSubmitted(true);
-        setTimeout(onSubmitted, 1400); // brief thank-you moment before closing
+        setTimeout(onSubmitted, 1400);
       }
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
   }, [onSubmitted]);
+
+  // Show confirm button after 15s — enough time to fill form, can't instantly skip
+  useEffect(() => {
+    const t = setTimeout(() => setCanConfirm(true), 15000);
+    return () => clearTimeout(t);
+  }, []);
+
+  const handleConfirm = () => {
+    setSubmitted(true);
+    setTimeout(onSubmitted, 1400);
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
@@ -114,14 +127,32 @@ export default function FeedbackGateModal({ onSubmitted }: { onSubmitted: () => 
 
         {/* ── Dark footer ── */}
         <div
-          className="px-5 py-2.5 flex items-center justify-between"
+          className="px-5 py-2.5 flex items-center justify-between gap-3"
           style={{
             background: 'rgba(10,8,20,0.98)',
             borderTop: '1px solid rgba(39,36,56,0.8)',
           }}
         >
-          <span className="text-[9px] font-mono text-zinc-700">submit the form above to continue</span>
-          <span className="text-[9px] font-mono text-zinc-700">5 runs · feedback · 5 runs · …</span>
+          <span className="text-[9px] font-mono text-zinc-700 flex-shrink-0">
+            {canConfirm ? 'submitted?' : 'fill the form above to continue'}
+          </span>
+          <AnimatePresence>
+            {canConfirm && !submitted && (
+              <motion.button
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                onClick={handleConfirm}
+                className="text-[10px] font-mono px-2.5 py-1 rounded flex-shrink-0"
+                style={{
+                  background: 'rgba(34,197,94,0.15)',
+                  color: '#4ade80',
+                  border: '1px solid rgba(34,197,94,0.3)',
+                }}
+              >
+                ✓ I've submitted
+              </motion.button>
+            )}
+          </AnimatePresence>
         </div>
       </motion.div>
     </div>
