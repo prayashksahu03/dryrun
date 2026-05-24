@@ -1,8 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
-// Tally fires a postMessage to the parent when a form is submitted.
-// This only works when the form is embedded as an iframe (not a new-tab link).
 const TALLY_EMBED = 'https://tally.so/embed/vGJyED?alignLeft=1&hideTitle=1&transparentBackground=1&dynamicHeight=1';
 
 function isTallySubmission(e: MessageEvent): boolean {
@@ -14,31 +12,32 @@ function isTallySubmission(e: MessageEvent): boolean {
 
 export default function FeedbackGateModal({ onSubmitted }: { onSubmitted: () => void }) {
   const [submitted, setSubmitted] = useState(false);
-  const [canConfirm, setCanConfirm] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const iframeLoads = useRef(0);
 
-  // Auto-close if Tally fires postMessage (best case)
+  const confirm = (delay = 0) => {
+    setSubmitted(true);
+    setTimeout(onSubmitted, delay);
+  };
+
+  // Auto-close via Tally postMessage (fires on production when cross-origin allows it)
   useEffect(() => {
     const handler = (e: MessageEvent) => {
-      if (isTallySubmission(e)) {
-        setSubmitted(true);
-        setTimeout(onSubmitted, 1400);
-      }
+      if (isTallySubmission(e)) confirm(1200);
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, [onSubmitted]);
-
-  // Show confirm button after 15s — enough time to fill form, can't instantly skip
-  useEffect(() => {
-    const t = setTimeout(() => setCanConfirm(true), 15000);
-    return () => clearTimeout(t);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleConfirm = () => {
-    setSubmitted(true);
-    setTimeout(onSubmitted, 1400);
+  // Fallback: Tally navigates the iframe to a thank-you page after submit,
+  // which fires a second 'load' event. Detect that as submission confirmation.
+  const handleIframeLoad = () => {
+    iframeLoads.current += 1;
+    if (iframeLoads.current >= 2) confirm(1200);
   };
+
+  const handleConfirm = () => confirm(0);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
@@ -60,12 +59,10 @@ export default function FeedbackGateModal({ onSubmitted }: { onSubmitted: () => 
           }}
           className="px-6 pt-6 pb-5"
         >
-          {/* Top accent line */}
           <div
             className="absolute top-0 left-0 right-0 h-px"
             style={{ background: 'linear-gradient(90deg, transparent, rgba(139,92,246,0.55), transparent)' }}
           />
-
           <div className="flex items-center gap-2.5 mb-2">
             <div
               className="w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0"
@@ -82,10 +79,8 @@ export default function FeedbackGateModal({ onSubmitted }: { onSubmitted: () => 
           </p>
         </div>
 
-        {/* ── Form section — light background is intentional ── */}
-        <div
-          style={{ background: '#ffffff', position: 'relative' }}
-        >
+        {/* ── Form section ── */}
+        <div style={{ background: '#ffffff', position: 'relative' }}>
           <AnimatePresence mode="wait">
             {submitted ? (
               <motion.div
@@ -119,6 +114,7 @@ export default function FeedbackGateModal({ onSubmitted }: { onSubmitted: () => 
                   marginWidth={0}
                   title="DryRun feedback"
                   style={{ display: 'block' }}
+                  onLoad={handleIframeLoad}
                 />
               </motion.div>
             )}
@@ -134,25 +130,23 @@ export default function FeedbackGateModal({ onSubmitted }: { onSubmitted: () => 
           }}
         >
           <span className="text-[9px] font-mono text-zinc-700 flex-shrink-0">
-            {canConfirm ? 'submitted?' : 'fill the form above to continue'}
+            fill the form above, then click →
           </span>
-          <AnimatePresence>
-            {canConfirm && !submitted && (
-              <motion.button
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                onClick={handleConfirm}
-                className="text-[10px] font-mono px-2.5 py-1 rounded flex-shrink-0"
-                style={{
-                  background: 'rgba(34,197,94,0.15)',
-                  color: '#4ade80',
-                  border: '1px solid rgba(34,197,94,0.3)',
-                }}
-              >
-                ✓ I've submitted
-              </motion.button>
-            )}
-          </AnimatePresence>
+          {!submitted && (
+            <motion.button
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              onClick={handleConfirm}
+              className="text-[10px] font-mono px-2.5 py-1 rounded flex-shrink-0"
+              style={{
+                background: 'rgba(34,197,94,0.15)',
+                color: '#4ade80',
+                border: '1px solid rgba(34,197,94,0.3)',
+              }}
+            >
+              ✓ I've submitted
+            </motion.button>
+          )}
         </div>
       </motion.div>
     </div>
