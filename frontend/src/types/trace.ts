@@ -10,7 +10,8 @@ export type VariableValue =
   | { kind: 'set';      data: SetEntry[] }
   | { kind: 'multiset'; data: SetEntry[] }
   | { kind: 'map';      data: Record<string, VariableValue> }
-  | { kind: 'iterator'; data: SetEntry[]; idx: number | null };
+  | { kind: 'iterator'; data: SetEntry[]; idx: number | null }
+  | { kind: 'array_ptr'; name: string; idx: number; data: VariableValue };
 
 export interface HeapBlock {
   address: string;

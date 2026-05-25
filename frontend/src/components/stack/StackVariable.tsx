@@ -21,6 +21,11 @@ function displayValue(v: VariableValue): string {
     return `{${parts.join(', ')}${entries.length > 3 ? ', …' : ''}}`;
   }
   if (v.kind === 'array') return `[${v.values.length}]`;
+  if (v.kind === 'array_ptr') {
+    const inner = v.data;
+    const len = inner && inner.kind === 'array' ? inner.values.length : '?';
+    return `→[${len}]`;
+  }
   if (v.kind === 'set' || v.kind === 'multiset') return `{${v.data.length}}`;
   if (v.kind === 'map')   return `{${Object.keys(v.data).length}}`;
   return '?';
