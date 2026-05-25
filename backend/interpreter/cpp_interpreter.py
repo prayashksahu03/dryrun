@@ -1074,7 +1074,15 @@ class CppInterpreter:
                 self._exec_stmt(ch[1])
         else:
             if len(ch) > 2:
-                self._exec_stmt(ch[2])
+                # Highlight the else clause's own line before executing its body.
+                else_c = ch[2]
+                else_line = else_c.location.line
+                # Only emit an extra step when the else is on a different line from the if
+                # and is NOT itself another if (else-if: the nested _exec_if handles it).
+                if else_line != line and else_c.kind != CK.IF_STMT:
+                    self._emit(else_line, 'else branch.',
+                               {'type': 'test', 'result': False})
+                self._exec_stmt(else_c)
 
     def _exec_for(self, cursor):
         line = cursor.location.line
@@ -1164,7 +1172,10 @@ class CppInterpreter:
         cond_c, body_c = ch[0], ch[1]
         iters = 0
         while True:
-            if not self._truthy(self._eval(cond_c)):
+            result = self._truthy(self._eval(cond_c))
+            self._emit(line, f"while → {'true' if result else 'false'}.",
+                       {'type': 'test', 'result': result})
+            if not result:
                 break
             iters += 1
             if iters > MAX_ITERS:
