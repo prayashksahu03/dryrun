@@ -696,8 +696,12 @@ class CppInterpreter:
         elif k == CK.CXX_FOR_RANGE_STMT:
             self._exec_range_for(cursor)
         elif k == CK.RETURN_STMT:
-            ch = self._ch(cursor)
-            val = self._eval(ch[0]) if ch else None
+            ch   = self._ch(cursor)
+            line = cursor.location.line
+            val  = self._eval(ch[0]) if ch else None
+            fmt  = self._fmt(val) if val is not None else 'void'
+            self._emit(line, f"Return {fmt}.",
+                       {'type': 'return', 'value': fmt})
             raise ReturnException(val)
         elif k == CK.SWITCH_STMT:
             self._exec_switch(cursor)
@@ -1057,8 +1061,15 @@ class CppInterpreter:
         ch = self._ch(cursor)
         if not ch:
             return
-        cond = self._eval(ch[0])
-        if self._truthy(cond):
+        line   = cursor.location.line
+        cond   = self._eval(ch[0])
+        result = self._truthy(cond)
+        branch = 'true' if result else 'false'
+        has_else = len(ch) > 2
+        desc = (f"if → {branch}, taking {'if' if result else 'else'} branch."
+                if has_else else f"if → {branch}.")
+        self._emit(line, desc, {'type': 'test', 'result': result})
+        if result:
             if len(ch) > 1:
                 self._exec_stmt(ch[1])
         else:

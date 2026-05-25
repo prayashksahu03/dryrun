@@ -302,7 +302,7 @@ function EditorMode() {
           {isCrash && <span className="text-red-400 font-semibold mr-1.5">CRASH</span>}
           {frame?.event.type === 'output'
             ? <pre className="whitespace-pre-wrap text-xs font-mono text-green-400 leading-relaxed m-0">
-                {'› '}{(frame.event as { type: 'output'; text: string }).text.trimEnd()}
+                {'› '}{(frame.event as { type: 'output'; text: string }).text.replace(/[\n\r]+$/, '')}
               </pre>
             : (frame?.description ?? 'Step through with → or press Space to play.')}
         </div>
