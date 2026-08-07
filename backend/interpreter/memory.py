@@ -44,6 +44,13 @@ class Memory:
             return self.stack[-1].setdefault('_oids', {}).setdefault(name, self.mint_oid())
         return self.mint_oid()
 
+    def bind_name(self, name: str, oid: str):
+        """Bind a NAME to an EXISTING object's identity (e.g. a reference).
+        No new object, no new identity — just another name for the same runtime
+        object. This is what makes int& r = x an alias rather than a copy."""
+        if self.stack:
+            self.stack[-1].setdefault('_oids', {})[name] = oid
+
     # ── Stack frames ───────────────────────────────────────────────────
 
     def push_frame(self, func_name: str, line: int):

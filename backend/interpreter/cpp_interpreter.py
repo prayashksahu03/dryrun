@@ -775,6 +775,9 @@ class CppInterpreter:
                 target_name = non_tr[0].spelling
                 ref_val = {'kind': 'ref', 'target': target_name}
                 self.memory.declare_var(name, ref_val)
+                # BIND_NAME(r -> target's oid): a reference introduces no new
+                # runtime identity — it is a second name for the SAME object.
+                self.memory.bind_name(name, self.memory.slot_oid(target_name))
                 self.memory.update_line(line)
                 self._emit(line, f"Declare {name} = ref({target_name}).",
                            {'type': 'assign', 'target': name, 'value': f'ref({target_name})'})

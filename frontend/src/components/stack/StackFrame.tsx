@@ -2,7 +2,6 @@ import { motion } from 'framer-motion';
 import { StackFrameData, VariableValue } from '../../types/trace';
 import { useExecutionStore } from '../../store/executionStore';
 import StackVariable from './StackVariable';
-import { getVisualIdentity } from '../../utils/visualIdentity';
 import ArrayViz, { ArrayPointer } from '../arrays/ArrayViz';
 import StringViz from '../arrays/StringViz';
 import HeapTreeViz from '../arrays/HeapTreeViz';
@@ -329,7 +328,10 @@ export default function StackFrameComponent({
 
           return (
             <StackVariable
-              key={getVisualIdentity(val, name)}
+              // Row key is the name (unique within a frame): a reference makes
+              // two names share ONE oid, so an oid row-key would collide. Morph
+              // identity still flows through the oid inside StackVariable.
+              key={name}
               frameName={frame.function}
               name={name}
               value={val}
