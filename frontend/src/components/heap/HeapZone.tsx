@@ -1,4 +1,3 @@
-import { useMemo } from 'react';
 import { AnimatePresence } from 'framer-motion';
 import { useExecutionStore } from '../../store/executionStore';
 import { HeapBlock, MemorySnapshot, VariableValue } from '../../types/trace';
@@ -7,7 +6,7 @@ import HeapBlockComponent from './HeapBlock';
 import { getVisualIdentity } from '../../utils/visualIdentity';
 import TreeView from './TreeView';
 import TrieView, { findTrieRoot } from './TrieView';
-import GraphViz, { detectGraph } from '../graph/GraphViz';
+import GraphViz from '../graph/GraphViz';
 import SegTreeViz from '../arrays/SegTreeViz';
 
 function isTreeHeap(heap: Record<string, HeapBlock>): boolean {
@@ -90,38 +89,9 @@ function findCurrentTreeNode(
 }
 
 export default function HeapZone() {
-  const { currentFrame, prevFrame, vizHints, trace, currentStep } = useExecutionStore();
+  const { currentFrame, prevFrame, vizHints } = useExecutionStore();
   const frame = currentFrame();
   const prev  = prevFrame();
-
-  // Options for graph detection (derived from user viz hints).
-  const skipVars = new Set(
-    Object.entries(vizHints)
-      .filter(([, h]) => h.kind === 'grid' || h.kind === 'struct')
-      .map(([n]) => n),
-  );
-  const pairDestFields: Record<string, 'first' | 'second'> = {};
-  for (const [n, h] of Object.entries(vizHints)) {
-    if (h.kind === 'pair_order') pairDestFields[n] = h.destField;
-  }
-
-  // ── Graph-never-disappears ───────────────────────────────────────────────
-  // Find the FIRST step in this run where a graph with LIVE traversal state
-  // (a visited set or a current node) was detected. From that step onward we
-  // keep showing the graph even after the traversal drains — the final step of
-  // a BFS (queue empty, no current node) must still render the graph, not raw
-  // adjacency arrays. Scrubbing back before that step correctly hides it (the
-  // traversal hasn't begun yet). Computed once per trace, not per render.
-  const firstGraphStep = useMemo(() => {
-    if (!trace) return Infinity;
-    for (let i = 0; i < trace.steps.length; i++) {
-      const g = detectGraph(trace.steps[i].memory, { skip: skipVars, pairDestFields });
-      if (g && (g.visited != null || g.currentNode != null)) return i;
-    }
-    return Infinity;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [trace, vizHints]);
-
   if (!frame) return null;
 
   const heap      = frame.memory.heap;
@@ -132,20 +102,15 @@ export default function HeapZone() {
 
   const entries = Object.entries(heap);
 
-  // ── Graph detection runs REGARDLESS of heap contents ─────────────────────
-  // A graph traversal (BFS/DFS) almost always allocates its adjacency vectors on
-  // the heap, so gating the graph on an empty heap hid it exactly when it
-  // mattered most. When the heap is non-empty we require EITHER live traversal
-  // state OR that we're at/after the step where this run's traversal began
-  // (`withinGraphPhase`) — so an incidental 2D array (e.g. a boolean DP table)
-  // isn't mistaken for a graph, while a real graph never vanishes mid-run.
-  const graph = detectGraph(frame.memory, { skip: skipVars, pairDestFields });
-  const graphHasTraversal = !!graph && (graph.visited != null || graph.currentNode != null);
-  const withinGraphPhase  = currentStep >= firstGraphStep;
-  if (graph && (entries.length === 0 || graphHasTraversal || withinGraphPhase)) {
+  // ── Graph: render the interpreter-declared descriptors 1:1 ───────────────
+  // Structure (nodes/edges/directedness) and roles (current/frontier/visited)
+  // are declared per step by the backend semantic-view resolver — the frontend
+  // performs ZERO detection. The GraphDescriptor persists once a run's traversal
+  // begins, so the graph never vanishes when the frontier drains.
+  if (frame.graph) {
     return (
       <div className="flex-1 overflow-y-auto">
-        <GraphViz data={graph} />
+        <GraphViz graph={frame.graph} execution={frame.execution} />
       </div>
     );
   }

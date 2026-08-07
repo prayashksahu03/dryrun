@@ -79,12 +79,41 @@ export type WarningKind =
   | 'pq-order-mismatch'
   | 'iterator-invalidation';
 
+// ── Semantic views (TRACE_CONTRACT_v2, slice 1) ──────────────────────────
+// Per-step, immutable descriptors declared by the interpreter. The renderer
+// consumes these directly and NEVER infers structure or roles from raw memory.
+//
+// GraphDescriptor = object semantics: what the graph structurally IS.
+// ExecutionDescriptor = execution semantics: which object plays which role,
+//   right now, each bound to a stable object identity (oid).
+export interface GraphDescriptor {
+  oid: string;
+  directed: boolean;
+  nodes: number[];
+  edges: { u: number; v: number; w?: number }[];
+}
+
+export type FrontierKind = 'queue' | 'stack' | 'callstack' | 'pq';
+
+export interface ExecutionDescriptor {
+  activeObject?: string;
+  current?: number | null;
+  parent?: number | null;
+  visited?: number[] | null;
+  frontier?: { kind: FrontierKind; members: number[]; oid?: string } | null;
+  // Derived, non-load-bearing label. Rendering never depends on it.
+  algorithm?: string | null;
+}
+
 export interface TraceStep {
   index: number;
   line: number;
   description: string;
   event: StepEvent;
   memory: MemorySnapshot;
+  // Declared semantic views for this snapshot (present only when applicable).
+  graph?: GraphDescriptor | null;
+  execution?: ExecutionDescriptor | null;
 }
 
 export interface Trace {
