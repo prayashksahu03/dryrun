@@ -1019,6 +1019,7 @@ class CppInterpreter:
                             arr_name = non_tr[0].spelling or self._cursor_name(non_tr[0])
                             val = {'kind': 'array_ptr', 'name': arr_name, 'idx': 0}
             self.memory.declare_var(name, val)
+            self._oid_for(name)   # mint identity at BIRTH (declaration), uniform with heap
             self.memory.update_line(line)
             self._emit(line, f"Declare {name} = {self._fmt(val)}.",
                        {'type': 'assign', 'target': name, 'value': self._fmt(val)})
@@ -1053,6 +1054,7 @@ class CppInterpreter:
                     and '*' not in type_spell and '[' not in type_spell):
                 val = {**val, '_uninit': True}
         self.memory.declare_var(name, val)
+        self._oid_for(name)   # mint identity at BIRTH (declaration), uniform with heap
         self.memory.update_line(line)
         _event = {'type': 'assign', 'target': name, 'value': self._fmt(val)}
         if non_tr:
