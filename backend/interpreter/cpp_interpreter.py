@@ -2841,6 +2841,7 @@ class CppInterpreter:
 
         addr  = self.memory.malloc(base, line)
         block = self.memory.heap[addr]
+        block['oid'] = self._mint_oid()          # identity minted at object birth
 
         # Run constructor if we know this class
         if base in self.class_defs:
@@ -6464,13 +6465,21 @@ class CppInterpreter:
     # the frontend "cause ribbon" can render WITHOUT any inference. Guarded to the
     # minimal shape `target = <read> [+|-|*|/|% <read|literal>]`; returns None for
     # anything else, so unsupported statements simply carry no cause.
+    def _mint_oid(self) -> str:
+        """Mint a fresh, never-reused object id — called at object BIRTH.
+        (Slice 3 hypothesis: identity is created exactly once, at birth,
+        regardless of where the object is allocated.)"""
+        if not hasattr(self, '_oids'):
+            self._oids, self._oid_seq = {}, 0
+        self._oid_seq += 1
+        return f'o{self._oid_seq}'
+
     def _oid_for(self, name: str) -> str:
-        """Stable, never-reused per-object id for a variable name (invariant: identity)."""
+        """Stable per-name object id — stack identity-by-name."""
         if not hasattr(self, '_oids'):
             self._oids, self._oid_seq = {}, 0
         if name not in self._oids:
-            self._oid_seq += 1
-            self._oids[name] = f'o{self._oid_seq}'
+            self._oids[name] = self._mint_oid()
         return self._oids[name]
 
     def _deep_unwrap(self, cursor):
@@ -6526,13 +6535,21 @@ class CppInterpreter:
             return None
 
     def _resolve_pointee(self, addr):
-        """Resolve a pointer's target to (name, oid). Identity-by-name works only
-        when the address maps to a NAMED stack variable — the slice-2 stress test.
-        Falls back to address-as-identity when there is no name (heap / unnamed)."""
+        """Resolve a pointer's target to (name_or_None, oid).
+        Stack lvalue -> identity-by-name (oid keyed on the variable name).
+        Heap object  -> OBJECT-OWNED identity (oid minted at birth, stored on the
+                        block) — this is what finally retires identity-by-name.
+        Unknown addr -> address-as-identity fallback."""
         av = getattr(self.memory, '_addr_var', {})
         if addr in av:
             _depth, name = av[addr]
             return name, self._oid_for(name)
+        heap = getattr(self.memory, 'heap', {})
+        if addr in heap:
+            blk = heap[addr]
+            if not blk.get('oid'):
+                blk['oid'] = self._mint_oid()   # backstop if born before stamping
+            return None, blk['oid']
         return None, (f'@{addr}' if addr else '@?')
 
     def _build_cause_chain(self, target_name: str, init_cursor, result_val):

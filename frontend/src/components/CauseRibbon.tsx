@@ -22,7 +22,7 @@ function RefChip({ label, name, via, oid, value, accent }: {
       >
         {/* pointee writes read `*via` so users see the write lands via the pointer */}
         {via && <span className="text-sky-400">*{via}→</span>}
-        <span>{name ?? '?'}</span>
+        <span>{name ?? 'heap'}</span>
         <span className="text-zinc-500">=</span>
         <span className={accent ? 'text-orange-200' : 'text-emerald-300'}>{value}</span>
       </div>
@@ -41,7 +41,7 @@ function DerefChip({ ptr, target }: {
       <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-sky-500/30 bg-sky-500/10 font-mono text-xs text-sky-200">
         <span>*{ptr}</span>
         <span className="text-zinc-500">→</span>
-        <span className="text-zinc-100">{target?.name ?? '?'}</span>
+        <span className="text-zinc-100">{target?.name ?? 'heap'}</span>
       </div>
       <span className="text-[8px] font-mono text-zinc-600">#{target?.oid}</span>
     </div>
