@@ -102,28 +102,33 @@ export default function HeapZone() {
 
   const entries = Object.entries(heap);
 
-  // ── Empty heap: try to show a graph or segment tree from stack ──
-  if (entries.length === 0) {
-    // Build skip set (variables user marked as non-graph) and pair dest overrides
-    const skipVars = new Set(
-      Object.entries(vizHints)
-        .filter(([, h]) => h.kind === 'grid' || h.kind === 'struct')
-        .map(([n]) => n),
+  // ── Graph detection runs REGARDLESS of heap contents ─────────────────────
+  // A graph traversal (BFS/DFS) almost always allocates its adjacency vectors on
+  // the heap, so gating the graph on an empty heap hid it exactly when it
+  // mattered most. When the heap is non-empty we require traversal state (a
+  // visited set or a current node) so an incidental 2D array (e.g. a DP table)
+  // isn't mistaken for a graph.
+  const skipVars = new Set(
+    Object.entries(vizHints)
+      .filter(([, h]) => h.kind === 'grid' || h.kind === 'struct')
+      .map(([n]) => n),
+  );
+  const pairDestFields: Record<string, 'first' | 'second'> = {};
+  for (const [n, h] of Object.entries(vizHints)) {
+    if (h.kind === 'pair_order') pairDestFields[n] = h.destField;
+  }
+  const graph = detectGraph(frame.memory, { skip: skipVars, pairDestFields });
+  const graphHasTraversal = !!graph && (graph.visited != null || graph.currentNode != null);
+  if (graph && (entries.length === 0 || graphHasTraversal)) {
+    return (
+      <div className="flex-1 overflow-y-auto">
+        <GraphViz data={graph} />
+      </div>
     );
-    const pairDestFields: Record<string, 'first' | 'second'> = {};
-    for (const [n, h] of Object.entries(vizHints)) {
-      if (h.kind === 'pair_order') pairDestFields[n] = h.destField;
-    }
+  }
 
-    const graph = detectGraph(frame.memory, { skip: skipVars, pairDestFields });
-    if (graph) {
-      return (
-        <div className="flex-1 overflow-y-auto">
-          <GraphViz data={graph} />
-        </div>
-      );
-    }
-
+  // ── Empty heap: try a segment tree from the stack ──
+  if (entries.length === 0) {
     const segTree = detectSegTree(frame.memory, vizHints);
     if (segTree) {
       let prevValue: VariableValue | undefined;
