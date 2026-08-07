@@ -2,6 +2,7 @@ import { motion } from 'framer-motion';
 import { StackFrameData, VariableValue } from '../../types/trace';
 import { useExecutionStore } from '../../store/executionStore';
 import StackVariable from './StackVariable';
+import { getVisualIdentity } from '../../utils/visualIdentity';
 import ArrayViz, { ArrayPointer } from '../arrays/ArrayViz';
 import StringViz from '../arrays/StringViz';
 import HeapTreeViz from '../arrays/HeapTreeViz';
@@ -142,7 +143,24 @@ export default function StackFrameComponent({
         {Object.keys(frame.variables).length === 0 && (
           <div className="text-zinc-700 text-[10px] font-mono px-2">no locals</div>
         )}
-        {Object.entries(frame.variables).map(([name, val]) => {
+        {(() => {
+          // Render OBJECTS, not names. A reference shares its target's oid, so
+          // fold it into the target's row as an extra nameplate — one box, two
+          // names. ("The nameplates are just bindings; the card is the object.")
+          const oidOf = (v: VariableValue) => getVisualIdentity(v);
+          const mergedAway = new Set<string>();
+          const aliasesByName: Record<string, string[]> = {};
+          for (const [nm, v] of Object.entries(frame.variables)) {
+            if (v.kind === 'ref') {
+              const tv = frame.variables[v.target];
+              if (tv && oidOf(v) && oidOf(v) === oidOf(tv)) {
+                mergedAway.add(nm);
+                (aliasesByName[v.target] ??= []).push(nm);
+              }
+            }
+          }
+          return Object.entries(frame.variables).map(([name, val]) => {
+          if (mergedAway.has(name)) return null;  // folded into its target's card
           if (val.kind === 'set' || val.kind === 'multiset') {
             return (
               <div key={name} className="px-1.5 pb-1">
@@ -335,10 +353,12 @@ export default function StackFrameComponent({
               frameName={frame.function}
               name={name}
               value={val}
+              aliases={aliasesByName[name]}
               changed={hasChanged(name, val)}
             />
           );
-        })}
+          });
+        })()}
       </div>
     </motion.div>
   );

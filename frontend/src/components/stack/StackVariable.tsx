@@ -33,12 +33,13 @@ function displayValue(v: VariableValue): string {
 }
 
 export default function StackVariable({
-  frameName, name, value, changed,
+  frameName, name, value, changed, aliases,
 }: {
   frameName: string;
   name: string;
   value: VariableValue;
   changed?: boolean;
+  aliases?: string[];   // other names bound to this same object (e.g. references)
 }) {
   const { register } = useRefRegistry();
   const ref = useRef<HTMLDivElement>(null);
@@ -67,7 +68,19 @@ export default function StackVariable({
       transition={{ duration: 0.75 }}
       className="flex items-center justify-between px-2 py-0.5 rounded"
     >
-      <span className="text-zinc-500 text-[11px] font-mono">{name}</span>
+      <span className="flex items-center gap-1">
+        <span className="text-zinc-500 text-[11px] font-mono">{name}</span>
+        {/* one box, two names: a reference is just another nameplate on the object */}
+        {aliases?.map((a) => (
+          <span
+            key={a}
+            title="reference — same object, another name"
+            className="text-[9px] font-mono px-1 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/25"
+          >
+            &amp;{a}
+          </span>
+        ))}
+      </span>
       <div className="flex items-center gap-1.5">
         {isPointer && (
           <span
