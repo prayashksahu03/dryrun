@@ -2984,10 +2984,14 @@ class CppInterpreter:
                     found_local = True
                     break
             if found_local:
-                self.memory.set_var(name, rval)
+                self.memory.set_var(name, rval)   # mutation: value changes, identity does not
                 self.memory.update_line(line)
-                self._emit(line, f"{name} = {self._fmt(rval)}.",
-                           {'type': 'assign', 'target': name, 'value': self._fmt(rval)})
+                _event = {'type': 'assign', 'target': name, 'value': self._fmt(rval)}
+                if rhs_cursor is not None:
+                    _cause = self._build_cause_chain(name, rhs_cursor, rval)
+                    if _cause:
+                        _event['cause'] = _cause
+                self._emit(line, f"{name} = {self._fmt(rval)}.", _event)
             elif self._this_stack:
                 self._write_this_field(name, rval, line)
                 self._emit(line, f"this->{name} = {self._fmt(rval)}.",
@@ -6467,22 +6471,14 @@ class CppInterpreter:
     # the frontend "cause ribbon" can render WITHOUT any inference. Guarded to the
     # minimal shape `target = <read> [+|-|*|/|% <read|literal>]`; returns None for
     # anything else, so unsupported statements simply carry no cause.
+    # Identity has a single source of truth: the Memory layer. A runtime object
+    # owns its oid (stack slot or heap block); names/pointers merely bind to it.
     def _mint_oid(self) -> str:
-        """Mint a fresh, never-reused object id — called at object BIRTH.
-        (Slice 3 hypothesis: identity is created exactly once, at birth,
-        regardless of where the object is allocated.)"""
-        if not hasattr(self, '_oids'):
-            self._oids, self._oid_seq = {}, 0
-        self._oid_seq += 1
-        return f'o{self._oid_seq}'
+        return self.memory.mint_oid()
 
     def _oid_for(self, name: str) -> str:
-        """Stable per-name object id — stack identity-by-name."""
-        if not hasattr(self, '_oids'):
-            self._oids, self._oid_seq = {}, 0
-        if name not in self._oids:
-            self._oids[name] = self._mint_oid()
-        return self._oids[name]
+        """Storage identity of the named variable — owned by the slot, not the value."""
+        return self.memory.slot_oid(name)
 
     def _deep_unwrap(self, cursor):
         c, seen = cursor, 0
@@ -6544,13 +6540,17 @@ class CppInterpreter:
         Unknown addr -> address-as-identity fallback."""
         av = getattr(self.memory, '_addr_var', {})
         if addr in av:
-            _depth, name = av[addr]
-            return name, self._oid_for(name)
+            depth, name = av[addr]
+            if 0 <= depth < len(self.memory.stack):
+                oid = self.memory.stack[depth].get('_oids', {}).get(name)
+                if oid:
+                    return name, oid
+            return name, self.memory.slot_oid(name)
         heap = getattr(self.memory, 'heap', {})
         if addr in heap:
             blk = heap[addr]
             if not blk.get('oid'):
-                blk['oid'] = self._mint_oid()   # backstop if born before stamping
+                blk['oid'] = self.memory.mint_oid()   # backstop if born before stamping
             return None, blk['oid']
         return None, (f'@{addr}' if addr else '@?')
 

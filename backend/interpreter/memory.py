@@ -26,10 +26,29 @@ class Memory:
         self._var_addr:  dict = {}   # (depth, name) -> stack_addr
         self._addr_var:  dict = {}   # stack_addr -> (depth, name)
 
+        # Object identity (TRACE_CONTRACT_v2, LAW 1). oid is owned by the storage
+        # object, minted once at birth, never by the value. Single source of truth.
+        self._oid_seq: int = 0
+
+    def mint_oid(self) -> str:
+        self._oid_seq += 1
+        return f'o{self._oid_seq}'
+
+    def slot_oid(self, name: str) -> str:
+        """The storage identity of the nearest in-scope variable named `name`."""
+        for frame in reversed(self.stack):
+            oids = frame.get('_oids')
+            if oids and name in oids:
+                return oids[name]
+        if self.stack:  # backstop: mint on the top frame (should be rare)
+            return self.stack[-1].setdefault('_oids', {}).setdefault(name, self.mint_oid())
+        return self.mint_oid()
+
     # ── Stack frames ───────────────────────────────────────────────────
 
     def push_frame(self, func_name: str, line: int):
-        self.stack.append({'function': func_name, 'line': line, 'variables': {}})
+        self.stack.append({'function': func_name, 'line': line,
+                           'variables': {}, '_oids': {}})
 
     def pop_frame(self):
         if self.stack:
@@ -58,6 +77,11 @@ class Memory:
     def declare_var(self, name: str, value):
         if self.stack:
             self.stack[-1]['variables'][name] = value
+            # Mint the storage object's identity at birth (declaration). The oid
+            # lives on the slot, not the value, so mutation never changes it.
+            oids = self.stack[-1].setdefault('_oids', {})
+            if name not in oids:
+                oids[name] = self.mint_oid()
 
     def update_line(self, line: int):
         if self.stack:
@@ -222,7 +246,13 @@ class Memory:
         return {'kind': 'pointer', 'address': None}
 
     def snapshot(self) -> dict:
-        return {
-            'stack': copy.deepcopy(self.stack),
-            'heap':  copy.deepcopy(self.heap),
-        }
+        stack = copy.deepcopy(self.stack)
+        # Stamp every serialized variable with its storage object's oid, so the
+        # frontend sees stable identity (LAW 1). The private _oids map is not
+        # part of the serialized shape, so strip it after stamping.
+        for frame in stack:
+            oids = frame.pop('_oids', {})
+            for nm, val in frame.get('variables', {}).items():
+                if isinstance(val, dict) and nm in oids:
+                    val['oid'] = oids[nm]
+        return {'stack': stack, 'heap': copy.deepcopy(self.heap)}
