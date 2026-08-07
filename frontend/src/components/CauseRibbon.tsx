@@ -7,9 +7,10 @@ import type { CauseOp } from '../types/trace';
 // backend declared, in the order it declared them. That is the whole point
 // of the slice: prove the trace model can drive the UI on its own.
 
-function RefChip({ label, name, via, oid, value, accent }: {
-  label: string; name?: string; via?: string; oid: string; value: number; accent?: boolean;
+function RefChip({ label, name, via, index, oid, value, accent }: {
+  label: string; name?: string; via?: string; index?: number; oid?: string; value: number; accent?: boolean;
 }) {
+  const display = index != null ? `${name}[${index}]` : (name ?? 'heap');
   return (
     <div className="flex flex-col items-center gap-1">
       <span className="text-[9px] font-mono uppercase tracking-wider text-zinc-500">{label}</span>
@@ -22,11 +23,28 @@ function RefChip({ label, name, via, oid, value, accent }: {
       >
         {/* pointee writes read `*via` so users see the write lands via the pointer */}
         {via && <span className="text-sky-400">*{via}→</span>}
-        <span>{name ?? 'heap'}</span>
+        <span>{display}</span>
         <span className="text-zinc-500">=</span>
         <span className={accent ? 'text-orange-200' : 'text-emerald-300'}>{value}</span>
       </div>
       {/* stable per-object identity — visible so users never have to infer it */}
+      {oid && <span className="text-[8px] font-mono text-zinc-600">#{oid}</span>}
+    </div>
+  );
+}
+
+function IndexChip({ name, index, oid }: { name?: string; index: number; oid?: string }) {
+  return (
+    <div className="flex flex-col items-center gap-1">
+      <span className="text-[9px] font-mono uppercase tracking-wider text-zinc-500">index</span>
+      <div className="flex items-center gap-1 px-2.5 py-1 rounded-md border border-sky-500/30 bg-sky-500/10 font-mono text-xs text-sky-200">
+        <span>{name}</span>
+        <span className="text-zinc-500">[</span>
+        <span className="text-amber-300">{index}</span>
+        <span className="text-zinc-500">]</span>
+        <span className="text-zinc-500">→</span>
+        <span className="text-zinc-100">cell</span>
+      </div>
       <span className="text-[8px] font-mono text-zinc-600">#{oid}</span>
     </div>
   );
@@ -94,7 +112,8 @@ export default function CauseRibbon({ cause }: { cause: CauseOp[] }) {
               transition={{ delay: 0.12 * i, duration: 0.2, ease: 'easeOut' }}
             >
               {op.op === 'READ' && (
-                <RefChip label="read" name={op.ref.name} oid={op.ref.oid} value={op.value} />
+                <RefChip label="read" name={op.ref.name} index={op.ref.index}
+                         oid={op.ref.oid ?? op.ref.container_oid} value={op.value} />
               )}
               {op.op === 'COMPUTE' && (
                 <ComputeChip operator={op.operator} operands={op.operands} value={op.value} />
@@ -102,8 +121,12 @@ export default function CauseRibbon({ cause }: { cause: CauseOp[] }) {
               {op.op === 'DEREF' && (
                 <DerefChip ptr={op.ref.name} target={op.target} />
               )}
+              {op.op === 'INDEX' && (
+                <IndexChip name={op.ref.name} index={op.index} oid={op.ref.oid ?? op.ref.container_oid} />
+              )}
               {op.op === 'WRITE' && (
-                <RefChip label="write" name={op.ref.name} via={op.ref.via} oid={op.ref.oid} value={op.value} accent />
+                <RefChip label="write" name={op.ref.name} via={op.ref.via} index={op.ref.index}
+                         oid={op.ref.oid ?? op.ref.container_oid} value={op.value} accent />
               )}
             </motion.div>
           </div>
