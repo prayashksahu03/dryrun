@@ -175,6 +175,7 @@ export default function StackFrameComponent({
           }
           return Object.entries(frame.variables).map(([name, val]) => {
           if (mergedAway.has(name)) return null;  // folded into its target's card
+          if (name.startsWith('__')) return null; // internal machinery (e.g. range-for iterator)
           if (val.kind === 'set' || val.kind === 'multiset') {
             return (
               <div key={name} className="px-1.5 pb-1">
