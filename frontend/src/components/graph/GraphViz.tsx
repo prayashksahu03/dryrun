@@ -19,6 +19,7 @@ export interface GraphData {
   visited: number[] | null;
   currentNode: number | null;
   parentNode: number | null;
+  frontier: number[] | null;   // nodes waiting in the queue/stack (the BFS/DFS wavefront)
   edgeWeights?: number[][];
 }
 
@@ -73,7 +74,29 @@ function findTraversalState(memory: MemorySnapshot, n: number) {
     }
   }
 
-  return { visited, currentNode, parentNode };
+  // ── frontier: nodes currently held in a queue / stack / deque container ──
+  // (the BFS/DFS wavefront — waiting to be processed).
+  let frontier: number[] | null = null;
+  for (const f of memory.stack) {
+    for (const vval of Object.values(f.variables)) {
+      if (vval.kind !== 'array') continue;
+      const ct = (vval.ctype ?? '').toLowerCase();
+      if (!ct.includes('queue') && !ct.includes('stack') && !ct.includes('deque')) continue;
+      // Container elements may be raw numbers or {kind:'int', value} objects.
+      const raw = vval.values as unknown[];
+      const arr = raw
+        .map(x => typeof x === 'number' ? x
+             : (x && typeof x === 'object' && typeof (x as { value?: unknown }).value === 'number'
+                ? (x as { value: number }).value : null))
+        .filter((x): x is number => x !== null);
+      if (arr.length && arr.length === raw.length && arr.every(x => x >= 0 && x < n)) {
+        frontier = arr; break;
+      }
+    }
+    if (frontier) break;
+  }
+
+  return { visited, currentNode, parentNode, frontier };
 }
 
 export function detectGraph(
@@ -175,10 +198,10 @@ export function detectGraph(
         row.slice(0, n).every((v, j) => v === mat[j]?.[i]),
       );
 
-      const { visited: visW, currentNode: curW, parentNode: parW } = findTraversalState(memory, n);
+      const { visited: visW, currentNode: curW, parentNode: parW, frontier: frW } = findTraversalState(memory, n);
       return {
         n, adj: mat, directed: !isSymmetricW,
-        visited: visW, currentNode: curW, parentNode: parW,
+        visited: visW, currentNode: curW, parentNode: parW, frontier: frW,
         edgeWeights: isPairNeighbors ? wmat : undefined,
       };
 
@@ -190,8 +213,8 @@ export function detectGraph(
       row.slice(0, n).every((v, j) => v === mat[j]?.[i]),
     );
 
-    const { visited, currentNode, parentNode } = findTraversalState(memory, n);
-    return { n, adj: mat, directed: !isSymmetric, visited, currentNode, parentNode };
+    const { visited, currentNode, parentNode, frontier } = findTraversalState(memory, n);
+    return { n, adj: mat, directed: !isSymmetric, visited, currentNode, parentNode, frontier };
   }
   return null;
 }
@@ -224,7 +247,8 @@ const NODE_R = 17;
 // ── Component ──────────────────────────────────────────────────────────
 
 export default function GraphViz({ data }: { data: GraphData }) {
-  const { n, adj, directed, visited, currentNode, parentNode, edgeWeights } = data;
+  const { n, adj, directed, visited, currentNode, parentNode, frontier, edgeWeights } = data;
+  const frontierSet = new Set(frontier ?? []);
 
   const W = 340;
   const H = n <= 4 ? 230 : n <= 6 ? 270 : n <= 8 ? 300 : 330;
@@ -246,6 +270,7 @@ export default function GraphViz({ data }: { data: GraphData }) {
         </span>
         <div className="flex items-center gap-2 ml-auto">
           {visited && <Legend color="rgba(34,197,94,0.7)" label="visited" />}
+          {frontierSet.size > 0 && <Legend color="rgba(56,189,248,0.85)" label="in queue" />}
           {currentNode !== null && <Legend color="#fbbf24" label="active" />}
         </div>
       </div>
@@ -315,17 +340,24 @@ export default function GraphViz({ data }: { data: GraphData }) {
           const isVisited  = visited ? visited[i] === 1 : false;
           const isCurrent  = i === currentNode;
           const isParent   = i === parentNode;
+          // A node waiting in the queue/stack — the wavefront. Since BFS marks
+          // nodes visited as it enqueues them, "in queue" distinguishes nodes
+          // still waiting from nodes already processed (dequeued).
+          const isFrontier = frontierSet.has(i) && !isCurrent;
 
-          const fill   = isCurrent ? 'rgba(251,191,36,0.16)' :
-                         isParent  ? 'rgba(99,102,241,0.16)' :
-                         isVisited ? 'rgba(34,197,94,0.10)' :
+          const fill   = isCurrent  ? 'rgba(251,191,36,0.16)' :
+                         isFrontier ? 'rgba(56,189,248,0.16)' :
+                         isParent   ? 'rgba(99,102,241,0.16)' :
+                         isVisited  ? 'rgba(34,197,94,0.10)' :
                          'rgba(15,15,20,0.95)';
-          const stroke = isCurrent ? '#fbbf24' :
-                         isParent  ? 'rgba(129,140,248,0.75)' :
-                         isVisited ? 'rgba(34,197,94,0.55)' :
+          const stroke = isCurrent  ? '#fbbf24' :
+                         isFrontier ? 'rgba(56,189,248,0.85)' :
+                         isParent   ? 'rgba(129,140,248,0.75)' :
+                         isVisited  ? 'rgba(34,197,94,0.55)' :
                          'rgba(63,63,70,0.45)';
-          const textFill = isCurrent ? '#fbbf24' :
-                           isVisited ? '#86efac' :
+          const textFill = isCurrent  ? '#fbbf24' :
+                           isFrontier ? '#7dd3fc' :
+                           isVisited  ? '#86efac' :
                            '#52525b';
 
           return (
