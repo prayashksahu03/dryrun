@@ -3,6 +3,7 @@ import { useExecutionStore } from '../../store/executionStore';
 import { HeapBlock, MemorySnapshot, VariableValue } from '../../types/trace';
 import { VizHint } from '../../types/ambiguity';
 import HeapBlockComponent from './HeapBlock';
+import { getVisualIdentity } from '../../utils/visualIdentity';
 import TreeView from './TreeView';
 import TrieView, { findTrieRoot } from './TrieView';
 import GraphViz, { detectGraph } from '../graph/GraphViz';
@@ -228,7 +229,7 @@ export default function HeapZone() {
         <AnimatePresence>
           {entries.map(([addr, block]) => (
             <HeapBlockComponent
-              key={addr}
+              key={getVisualIdentity(block, addr)}
               address={addr}
               block={block}
               isCrashTarget={addr === crashAddr}

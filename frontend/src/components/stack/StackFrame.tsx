@@ -2,6 +2,7 @@ import { motion } from 'framer-motion';
 import { StackFrameData, VariableValue } from '../../types/trace';
 import { useExecutionStore } from '../../store/executionStore';
 import StackVariable from './StackVariable';
+import { getVisualIdentity } from '../../utils/visualIdentity';
 import ArrayViz, { ArrayPointer } from '../arrays/ArrayViz';
 import StringViz from '../arrays/StringViz';
 import HeapTreeViz from '../arrays/HeapTreeViz';
@@ -79,6 +80,20 @@ export default function StackFrameComponent({
   const prevFrame = useExecutionStore(s => s.prevFrame());
   const vizHints  = useExecutionStore(s => s.vizHints);
 
+  // Pilot 1 (semantic pilot): consume the DECLARED written cell from the step's
+  // cause chain instead of the bespoke lastWrite field. When the active step
+  // declares WRITE(cell{name,index}), the grid highlights that exact cell — the
+  // same fact that drives the cause ribbon, so ribbon and grid can't drift.
+  const curEvent = useExecutionStore(s => s.currentFrame()?.event);
+  const declaredWrites: Record<string, number[]> = {};
+  if (isActive && curEvent && curEvent.type === 'assign' && curEvent.cause) {
+    for (const op of curEvent.cause) {
+      if (op.op === 'WRITE' && op.ref.kind === 'cell' && op.ref.name && op.ref.index != null) {
+        declaredWrites[op.ref.name] = [op.ref.index];
+      }
+    }
+  }
+
   // Find this function's variables in the previous step (matched by function name)
   const prevVars = prevFrame?.memory.stack
     .find(f => f.function === frame.function)?.variables ?? {};
@@ -142,7 +157,24 @@ export default function StackFrameComponent({
         {Object.keys(frame.variables).length === 0 && (
           <div className="text-zinc-700 text-[10px] font-mono px-2">no locals</div>
         )}
-        {Object.entries(frame.variables).map(([name, val]) => {
+        {(() => {
+          // Render OBJECTS, not names. A reference shares its target's oid, so
+          // fold it into the target's row as an extra nameplate — one box, two
+          // names. ("The nameplates are just bindings; the card is the object.")
+          const oidOf = (v: VariableValue) => getVisualIdentity(v);
+          const mergedAway = new Set<string>();
+          const aliasesByName: Record<string, string[]> = {};
+          for (const [nm, v] of Object.entries(frame.variables)) {
+            if (v.kind === 'ref') {
+              const tv = frame.variables[v.target];
+              if (tv && oidOf(v) && oidOf(v) === oidOf(tv)) {
+                mergedAway.add(nm);
+                (aliasesByName[v.target] ??= []).push(nm);
+              }
+            }
+          }
+          return Object.entries(frame.variables).map(([name, val]) => {
+          if (mergedAway.has(name)) return null;  // folded into its target's card
           if (val.kind === 'set' || val.kind === 'multiset') {
             return (
               <div key={name} className="px-1.5 pb-1">
@@ -291,7 +323,9 @@ export default function StackFrameComponent({
                   values={val.values as number[] | number[][]}
                   rows={val.rows}
                   cols={val.cols}
-                  lastWrite={val.lastWrite}
+                  // declared WRITE(cell) from the cause chain wins; fall back to
+                  // the legacy lastWrite only when no cause declares the write
+                  lastWrite={declaredWrites[name] ?? val.lastWrite}
                   pointers={pointers}
                   windowLeft={win?.left}
                   windowRight={win?.right}
@@ -328,14 +362,19 @@ export default function StackFrameComponent({
 
           return (
             <StackVariable
+              // Row key is the name (unique within a frame): a reference makes
+              // two names share ONE oid, so an oid row-key would collide. Morph
+              // identity still flows through the oid inside StackVariable.
               key={name}
               frameName={frame.function}
               name={name}
               value={val}
+              aliases={aliasesByName[name]}
               changed={hasChanged(name, val)}
             />
           );
-        })}
+          });
+        })()}
       </div>
     </motion.div>
   );

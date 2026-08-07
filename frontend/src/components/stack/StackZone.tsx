@@ -2,6 +2,7 @@ import { useRef, useEffect } from 'react';
 import { AnimatePresence } from 'framer-motion';
 import { useExecutionStore } from '../../store/executionStore';
 import StackFrameComponent from './StackFrame';
+import { getVisualIdentity } from '../../utils/visualIdentity';
 
 export default function StackZone() {
   const { currentFrame } = useExecutionStore();
@@ -25,7 +26,7 @@ export default function StackZone() {
       <AnimatePresence>
         {stackFrames.map((sf, i) => (
           <StackFrameComponent
-            key={sf.function + i}
+            key={getVisualIdentity(sf, sf.function + i)}
             frame={sf}
             isActive={i === stackFrames.length - 1}
           />

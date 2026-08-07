@@ -2,6 +2,7 @@ import { useRef, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { VariableValue } from '../../types/trace';
 import { useRefRegistry } from '../../contexts/refRegistry';
+import { getVisualIdentity } from '../../utils/visualIdentity';
 
 function displayValue(v: VariableValue): string {
   if (v.kind === 'pointer') return v.address ?? 'NULL';
@@ -32,12 +33,13 @@ function displayValue(v: VariableValue): string {
 }
 
 export default function StackVariable({
-  frameName, name, value, changed,
+  frameName, name, value, changed, aliases,
 }: {
   frameName: string;
   name: string;
   value: VariableValue;
   changed?: boolean;
+  aliases?: string[];   // other names bound to this same object (e.g. references)
 }) {
   const { register } = useRefRegistry();
   const ref = useRef<HTMLDivElement>(null);
@@ -54,13 +56,31 @@ export default function StackVariable({
   return (
     <motion.div
       ref={ref}
-      key={changed ? `${name}-${displayed}` : name}
-      initial={{ backgroundColor: changed ? 'rgba(245,158,11,0.12)' : 'rgba(0,0,0,0)' }}
-      animate={{ backgroundColor: 'rgba(0,0,0,0)' }}
+      // Identity is the object's oid: the row persists across value changes and
+      // morphs in place (it no longer remounts on every mutation). The amber
+      // change-flash is driven by `animate` keyed on the value, not by remount.
+      key={getVisualIdentity(value, name)}
+      animate={{
+        backgroundColor: changed
+          ? ['rgba(245,158,11,0.12)', 'rgba(0,0,0,0)']
+          : 'rgba(0,0,0,0)',
+      }}
       transition={{ duration: 0.75 }}
       className="flex items-center justify-between px-2 py-0.5 rounded"
     >
-      <span className="text-zinc-500 text-[11px] font-mono">{name}</span>
+      <span className="flex items-center gap-1">
+        <span className="text-zinc-500 text-[11px] font-mono">{name}</span>
+        {/* one box, two names: a reference is just another nameplate on the object */}
+        {aliases?.map((a) => (
+          <span
+            key={a}
+            title="reference — same object, another name"
+            className="text-[9px] font-mono px-1 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/25"
+          >
+            &amp;{a}
+          </span>
+        ))}
+      </span>
       <div className="flex items-center gap-1.5">
         {isPointer && (
           <span

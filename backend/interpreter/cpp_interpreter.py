@@ -775,6 +775,9 @@ class CppInterpreter:
                 target_name = non_tr[0].spelling
                 ref_val = {'kind': 'ref', 'target': target_name}
                 self.memory.declare_var(name, ref_val)
+                # BIND_NAME(r -> target's oid): a reference introduces no new
+                # runtime identity — it is a second name for the SAME object.
+                self.memory.bind_name(name, self.memory.slot_oid(target_name))
                 self.memory.update_line(line)
                 self._emit(line, f"Declare {name} = ref({target_name}).",
                            {'type': 'assign', 'target': name, 'value': f'ref({target_name})'})
@@ -2984,10 +2987,14 @@ class CppInterpreter:
                     found_local = True
                     break
             if found_local:
-                self.memory.set_var(name, rval)
+                self.memory.set_var(name, rval)   # mutation: value changes, identity does not
                 self.memory.update_line(line)
-                self._emit(line, f"{name} = {self._fmt(rval)}.",
-                           {'type': 'assign', 'target': name, 'value': self._fmt(rval)})
+                _event = {'type': 'assign', 'target': name, 'value': self._fmt(rval)}
+                if rhs_cursor is not None:
+                    _cause = self._build_cause_chain(name, rhs_cursor, rval)
+                    if _cause:
+                        _event['cause'] = _cause
+                self._emit(line, f"{name} = {self._fmt(rval)}.", _event)
             elif self._this_stack:
                 self._write_this_field(name, rval, line)
                 self._emit(line, f"this->{name} = {self._fmt(rval)}.",
@@ -2999,12 +3006,12 @@ class CppInterpreter:
             return
 
         if k == CK.ARRAY_SUBSCRIPT_EXPR:
-            self._write_subscript(cursor, rval, line)
+            self._write_subscript(cursor, rval, line, rhs_cursor=rhs_cursor)
             return
 
         # operator[] write: CALL_EXPR 'operator[]' used as lvalue
         if k == CK.CALL_EXPR and cursor.spelling == 'operator[]':
-            self._write_subscript_call(cursor, rval, line)
+            self._write_subscript_call(cursor, rval, line, rhs_cursor=rhs_cursor)
             return
 
         if k == CK.UNARY_OPERATOR:
@@ -3068,7 +3075,7 @@ class CppInterpreter:
             except RuntimeError:
                 pass
 
-    def _write_subscript(self, cursor, rval, line: int):
+    def _write_subscript(self, cursor, rval, line: int, rhs_cursor=None):
         """Write rval to arr[i] or arr[i][j]."""
         ch = self._ch(cursor)
         if len(ch) < 2:
@@ -3118,8 +3125,11 @@ class CppInterpreter:
             v = self._arr_set(arr_val, [idx], rval, line)
             self._put_array(arr_name, arr_c, arr_val, line)
             lbl = arr_name or 'arr'
-            self._emit(line, f"{lbl}[{idx}] = {v}.",
-                       {'type': 'assign', 'target': f'{lbl}[{idx}]', 'value': str(v)})
+            _event = {'type': 'assign', 'target': f'{lbl}[{idx}]', 'value': str(v)}
+            _cause = self._build_index_cause(arr_name, idx, idx_c, rhs_cursor, rval)
+            if _cause:
+                _event['cause'] = _cause
+            self._emit(line, f"{lbl}[{idx}] = {v}.", _event)
             return
         # String subscript write: s[i] = c  (char-kind variables)
         if isinstance(arr_val, dict) and arr_val.get('kind') == 'char':
@@ -3158,7 +3168,7 @@ class CppInterpreter:
                 self._emit(line, f"{lbl}[{idx}] = {v}.",
                            {'type': 'assign', 'target': f'{lbl}[{idx}]', 'value': str(v)})
 
-    def _write_subscript_call(self, cursor, rval, line: int):
+    def _write_subscript_call(self, cursor, rval, line: int, rhs_cursor=None):
         """Write via CALL_EXPR 'operator[]': obj[i] = val  or  obj[i][j] = val.
         Structure: ch[0]=object, ch[1]=method_ref(skip), ch[-1]=index."""
         ch = self._ch(cursor)
@@ -3202,8 +3212,11 @@ class CppInterpreter:
         if isinstance(arr_val, dict) and arr_val.get('kind') == 'array':
             v = self._arr_set(arr_val, [idx], rval, line)
             self._put_array(arr_name, obj_c, arr_val, line)
-            self._emit(line, f"{lbl}[{idx}] = {v}.",
-                       {'type': 'assign', 'target': f'{lbl}[{idx}]', 'value': str(v)})
+            _event = {'type': 'assign', 'target': f'{lbl}[{idx}]', 'value': str(v)}
+            _cause = self._build_index_cause(arr_name, idx, idx_c, rhs_cursor, rval)
+            if _cause:
+                _event['cause'] = _cause
+            self._emit(line, f"{lbl}[{idx}] = {v}.", _event)
             return
         # String operator[] write: s[i] = c
         if isinstance(arr_val, dict) and arr_val.get('kind') == 'char':
@@ -6467,22 +6480,14 @@ class CppInterpreter:
     # the frontend "cause ribbon" can render WITHOUT any inference. Guarded to the
     # minimal shape `target = <read> [+|-|*|/|% <read|literal>]`; returns None for
     # anything else, so unsupported statements simply carry no cause.
+    # Identity has a single source of truth: the Memory layer. A runtime object
+    # owns its oid (stack slot or heap block); names/pointers merely bind to it.
     def _mint_oid(self) -> str:
-        """Mint a fresh, never-reused object id — called at object BIRTH.
-        (Slice 3 hypothesis: identity is created exactly once, at birth,
-        regardless of where the object is allocated.)"""
-        if not hasattr(self, '_oids'):
-            self._oids, self._oid_seq = {}, 0
-        self._oid_seq += 1
-        return f'o{self._oid_seq}'
+        return self.memory.mint_oid()
 
     def _oid_for(self, name: str) -> str:
-        """Stable per-name object id — stack identity-by-name."""
-        if not hasattr(self, '_oids'):
-            self._oids, self._oid_seq = {}, 0
-        if name not in self._oids:
-            self._oids[name] = self._mint_oid()
-        return self._oids[name]
+        """Storage identity of the named variable — owned by the slot, not the value."""
+        return self.memory.slot_oid(name)
 
     def _deep_unwrap(self, cursor):
         c, seen = cursor, 0
@@ -6544,13 +6549,17 @@ class CppInterpreter:
         Unknown addr -> address-as-identity fallback."""
         av = getattr(self.memory, '_addr_var', {})
         if addr in av:
-            _depth, name = av[addr]
-            return name, self._oid_for(name)
+            depth, name = av[addr]
+            if 0 <= depth < len(self.memory.stack):
+                oid = self.memory.stack[depth].get('_oids', {}).get(name)
+                if oid:
+                    return name, oid
+            return name, self.memory.slot_oid(name)
         heap = getattr(self.memory, 'heap', {})
         if addr in heap:
             blk = heap[addr]
             if not blk.get('oid'):
-                blk['oid'] = self._mint_oid()   # backstop if born before stamping
+                blk['oid'] = self.memory.mint_oid()   # backstop if born before stamping
             return None, blk['oid']
         return None, (f'@{addr}' if addr else '@?')
 
@@ -6564,6 +6573,37 @@ class CppInterpreter:
                             'oid': self._oid_for(target_name)},
                     'value': self._to_int(result_val)})
         return ops
+
+    def _build_index_cause(self, arr_name, idx, idx_cursor, rhs_cursor, result_val):
+        """Ordered causal chain for `arr[i] = <rhs>` — INDEX addresses part of an
+        object, producing a cell reference {container_oid, index} that WRITE targets.
+        This generalizes addressing beyond names and pointers."""
+        try:
+            ops = []
+            arr_oid = self._oid_for(arr_name) if arr_name else None
+            # READ the index if it is a variable (a literal index needs no READ)
+            idc = self._deep_unwrap(idx_cursor)
+            if idc is not None and idc.kind == CK.DECL_REF_EXPR and idc.spelling:
+                nm = idc.spelling
+                ops.append({'op': 'READ',
+                            'ref': {'kind': 'name', 'name': nm, 'oid': self._oid_for(nm)},
+                            'value': idx})
+            # INDEX consumes the container + index and produces a cell reference
+            cell_ref = {'kind': 'cell', 'name': arr_name,
+                        'container_oid': arr_oid, 'index': idx}
+            ops.append({'op': 'INDEX',
+                        'ref': {'kind': 'name', 'name': arr_name, 'oid': arr_oid},
+                        'index': idx, 'cell': cell_ref})
+            # RHS value ops (READ v, or a COMPUTE), reusing the shared builder
+            if rhs_cursor is not None:
+                rhs_ops = self._rhs_cause_ops(rhs_cursor, result_val)
+                if rhs_ops:
+                    ops.extend(rhs_ops)
+            ops.append({'op': 'WRITE', 'ref': dict(cell_ref),
+                        'value': self._to_int(result_val)})
+            return ops
+        except Exception:
+            return None
 
     def _build_deref_cause(self, ptr_name: str, addr, rhs_cursor, result_val):
         """Ordered causal chain for `*p = <rhs>` — adds DEREF and a pointee WRITE."""
