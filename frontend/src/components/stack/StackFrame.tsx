@@ -80,6 +80,20 @@ export default function StackFrameComponent({
   const prevFrame = useExecutionStore(s => s.prevFrame());
   const vizHints  = useExecutionStore(s => s.vizHints);
 
+  // Pilot 1 (semantic pilot): consume the DECLARED written cell from the step's
+  // cause chain instead of the bespoke lastWrite field. When the active step
+  // declares WRITE(cell{name,index}), the grid highlights that exact cell — the
+  // same fact that drives the cause ribbon, so ribbon and grid can't drift.
+  const curEvent = useExecutionStore(s => s.currentFrame()?.event);
+  const declaredWrites: Record<string, number[]> = {};
+  if (isActive && curEvent && curEvent.type === 'assign' && curEvent.cause) {
+    for (const op of curEvent.cause) {
+      if (op.op === 'WRITE' && op.ref.kind === 'cell' && op.ref.name && op.ref.index != null) {
+        declaredWrites[op.ref.name] = [op.ref.index];
+      }
+    }
+  }
+
   // Find this function's variables in the previous step (matched by function name)
   const prevVars = prevFrame?.memory.stack
     .find(f => f.function === frame.function)?.variables ?? {};
@@ -309,7 +323,9 @@ export default function StackFrameComponent({
                   values={val.values as number[] | number[][]}
                   rows={val.rows}
                   cols={val.cols}
-                  lastWrite={val.lastWrite}
+                  // declared WRITE(cell) from the cause chain wins; fall back to
+                  // the legacy lastWrite only when no cause declares the write
+                  lastWrite={declaredWrites[name] ?? val.lastWrite}
                   pointers={pointers}
                   windowLeft={win?.left}
                   windowRight={win?.right}
