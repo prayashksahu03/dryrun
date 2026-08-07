@@ -7,8 +7,8 @@ import type { CauseOp } from '../types/trace';
 // backend declared, in the order it declared them. That is the whole point
 // of the slice: prove the trace model can drive the UI on its own.
 
-function RefChip({ label, name, oid, value, accent }: {
-  label: string; name?: string; oid: string; value: number; accent?: boolean;
+function RefChip({ label, name, via, oid, value, accent }: {
+  label: string; name?: string; via?: string; oid: string; value: number; accent?: boolean;
 }) {
   return (
     <div className="flex flex-col items-center gap-1">
@@ -20,12 +20,30 @@ function RefChip({ label, name, oid, value, accent }: {
             : 'bg-zinc-800/70 border-zinc-700/70 text-zinc-200'
         }`}
       >
-        <span>{name}</span>
+        {/* pointee writes read `*via` so users see the write lands via the pointer */}
+        {via && <span className="text-sky-400">*{via}→</span>}
+        <span>{name ?? '?'}</span>
         <span className="text-zinc-500">=</span>
         <span className={accent ? 'text-orange-200' : 'text-emerald-300'}>{value}</span>
       </div>
       {/* stable per-object identity — visible so users never have to infer it */}
       <span className="text-[8px] font-mono text-zinc-600">#{oid}</span>
+    </div>
+  );
+}
+
+function DerefChip({ ptr, target }: {
+  ptr?: string; target?: { name?: string; oid: string };
+}) {
+  return (
+    <div className="flex flex-col items-center gap-1">
+      <span className="text-[9px] font-mono uppercase tracking-wider text-zinc-500">deref</span>
+      <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-sky-500/30 bg-sky-500/10 font-mono text-xs text-sky-200">
+        <span>*{ptr}</span>
+        <span className="text-zinc-500">→</span>
+        <span className="text-zinc-100">{target?.name ?? '?'}</span>
+      </div>
+      <span className="text-[8px] font-mono text-zinc-600">#{target?.oid}</span>
     </div>
   );
 }
@@ -81,8 +99,11 @@ export default function CauseRibbon({ cause }: { cause: CauseOp[] }) {
               {op.op === 'COMPUTE' && (
                 <ComputeChip operator={op.operator} operands={op.operands} value={op.value} />
               )}
+              {op.op === 'DEREF' && (
+                <DerefChip ptr={op.ref.name} target={op.target} />
+              )}
               {op.op === 'WRITE' && (
-                <RefChip label="write" name={op.ref.name} oid={op.ref.oid} value={op.value} accent />
+                <RefChip label="write" name={op.ref.name} via={op.ref.via} oid={op.ref.oid} value={op.value} accent />
               )}
             </motion.div>
           </div>

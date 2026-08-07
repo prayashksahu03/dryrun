@@ -1557,7 +1557,7 @@ class CppInterpreter:
 
         if op == '=':
             rval = self._eval(ch[1])
-            self._write_lval(ch[0], rval, cursor.location.line)
+            self._write_lval(ch[0], rval, cursor.location.line, rhs_cursor=ch[1])
             return rval
 
         if op == '&&':
@@ -2944,8 +2944,10 @@ class CppInterpreter:
 
     # ── LValue writes ───────────────────────────────────────────────────────
 
-    def _write_lval(self, cursor, rval, line: int):
-        """Write rval to whatever lvalue cursor represents."""
+    def _write_lval(self, cursor, rval, line: int, rhs_cursor=None):
+        """Write rval to whatever lvalue cursor represents.
+        rhs_cursor (optional) is the source expression, used to build the
+        TRACE_CONTRACT_v2 cause chain for supported assignment shapes."""
         if cursor is None:
             return
         k = cursor.kind
@@ -2955,7 +2957,7 @@ class CppInterpreter:
                  CK.CSTYLE_CAST_EXPR):
             ch = self._ch(cursor)
             if ch:
-                self._write_lval(ch[0], rval, line)
+                self._write_lval(ch[0], rval, line, rhs_cursor=rhs_cursor)
             return
 
         if k == CK.DECL_REF_EXPR:
@@ -3012,9 +3014,13 @@ class CppInterpreter:
                     self.memory.write_via_addr(addr, rval, line)
                     ptr_name = self._cursor_name(ch[0])
                     self.memory.update_line(line)
-                    self._emit(line, f"*{ptr_name} = {self._fmt(rval)}.",
-                               {'type': 'assign', 'target': f'*{ptr_name}',
-                                'value': self._fmt(rval)})
+                    _event = {'type': 'assign', 'target': f'*{ptr_name}',
+                              'value': self._fmt(rval)}
+                    if rhs_cursor is not None:
+                        _cause = self._build_deref_cause(ptr_name, addr, rhs_cursor, rval)
+                        if _cause:
+                            _event['cause'] = _cause
+                    self._emit(line, f"*{ptr_name} = {self._fmt(rval)}.", _event)
 
     def _write_member_ref(self, cursor, rval, line: int):
         # NULL (defined as 0) assigned to a pointer field → coerce to null pointer
@@ -6488,8 +6494,8 @@ class CppInterpreter:
                      'value': val}, val)
         return (None, val)
 
-    def _build_cause_chain(self, target_name: str, init_cursor, result_val):
-        """Ordered causal chain for a scalar assignment, or None if unsupported."""
+    def _rhs_cause_ops(self, init_cursor, result_val):
+        """READ/COMPUTE ops for the RHS of an assignment (no WRITE), or None."""
         try:
             c = self._deep_unwrap(init_cursor)
             if c is None:
@@ -6503,32 +6509,58 @@ class CppInterpreter:
                     return None
                 left_op, left_val = self._cause_operand(ch[0])
                 right_op, right_val = self._cause_operand(ch[1])
-                chain = []
-                if left_op:  chain.append(left_op)
-                if right_op: chain.append(right_op)
-                res = self._to_int(result_val)
-                chain.append({'op': 'COMPUTE', 'operator': op,
-                              'operands': [left_val, right_val], 'value': res})
-                chain.append({'op': 'WRITE',
-                              'ref': {'kind': 'name', 'name': target_name,
-                                      'oid': self._oid_for(target_name)},
-                              'value': res})
-                return chain
+                ops = []
+                if left_op:  ops.append(left_op)
+                if right_op: ops.append(right_op)
+                ops.append({'op': 'COMPUTE', 'operator': op,
+                            'operands': [left_val, right_val],
+                            'value': self._to_int(result_val)})
+                return ops
             if c.kind == CK.DECL_REF_EXPR and c.spelling:
                 nm = c.spelling
-                val = self._to_int(self._eval(init_cursor))
-                return [
-                    {'op': 'READ',
-                     'ref': {'kind': 'name', 'name': nm, 'oid': self._oid_for(nm)},
-                     'value': val},
-                    {'op': 'WRITE',
-                     'ref': {'kind': 'name', 'name': target_name,
-                             'oid': self._oid_for(target_name)},
-                     'value': val},
-                ]
+                return [{'op': 'READ',
+                         'ref': {'kind': 'name', 'name': nm, 'oid': self._oid_for(nm)},
+                         'value': self._to_int(self._eval(init_cursor))}]
             return None
         except Exception:
             return None
+
+    def _resolve_pointee(self, addr):
+        """Resolve a pointer's target to (name, oid). Identity-by-name works only
+        when the address maps to a NAMED stack variable — the slice-2 stress test.
+        Falls back to address-as-identity when there is no name (heap / unnamed)."""
+        av = getattr(self.memory, '_addr_var', {})
+        if addr in av:
+            _depth, name = av[addr]
+            return name, self._oid_for(name)
+        return None, (f'@{addr}' if addr else '@?')
+
+    def _build_cause_chain(self, target_name: str, init_cursor, result_val):
+        """Ordered causal chain for a scalar name assignment, or None."""
+        ops = self._rhs_cause_ops(init_cursor, result_val)
+        if ops is None:
+            return None
+        ops.append({'op': 'WRITE',
+                    'ref': {'kind': 'name', 'name': target_name,
+                            'oid': self._oid_for(target_name)},
+                    'value': self._to_int(result_val)})
+        return ops
+
+    def _build_deref_cause(self, ptr_name: str, addr, rhs_cursor, result_val):
+        """Ordered causal chain for `*p = <rhs>` — adds DEREF and a pointee WRITE."""
+        ops = self._rhs_cause_ops(rhs_cursor, result_val)
+        if ops is None:
+            return None
+        tgt_name, tgt_oid = self._resolve_pointee(addr)
+        ops.append({'op': 'DEREF',
+                    'ref': {'kind': 'name', 'name': ptr_name,
+                            'oid': self._oid_for(ptr_name)},
+                    'target': {'name': tgt_name, 'oid': tgt_oid}})
+        ops.append({'op': 'WRITE',
+                    'ref': {'kind': 'pointee', 'name': tgt_name, 'via': ptr_name,
+                            'oid': tgt_oid},
+                    'value': self._to_int(result_val)})
+        return ops
 
     def _emit(self, line: int, description: str, event: dict):
         self.step_count += 1
