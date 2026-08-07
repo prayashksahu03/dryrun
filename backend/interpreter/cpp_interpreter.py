@@ -1054,8 +1054,12 @@ class CppInterpreter:
                 val = {**val, '_uninit': True}
         self.memory.declare_var(name, val)
         self.memory.update_line(line)
-        self._emit(line, f"Declare {name} = {self._fmt(val)}.",
-                   {'type': 'assign', 'target': name, 'value': self._fmt(val)})
+        _event = {'type': 'assign', 'target': name, 'value': self._fmt(val)}
+        if non_tr:
+            _cause = self._build_cause_chain(name, non_tr[0], val)
+            if _cause:
+                _event['cause'] = _cause
+        self._emit(line, f"Declare {name} = {self._fmt(val)}.", _event)
 
     def _exec_if(self, cursor):
         ch = self._ch(cursor)
@@ -6448,6 +6452,83 @@ class CppInterpreter:
         if raw_line <= 0:
             return raw_line
         return max(1, raw_line - self._line_offset)
+
+    # ── Cause chain (TRACE_CONTRACT_v2 walking-skeleton, slice 1) ──────────────
+    # Emits an ordered, self-describing causal chain for a scalar assignment so
+    # the frontend "cause ribbon" can render WITHOUT any inference. Guarded to the
+    # minimal shape `target = <read> [+|-|*|/|% <read|literal>]`; returns None for
+    # anything else, so unsupported statements simply carry no cause.
+    def _oid_for(self, name: str) -> str:
+        """Stable, never-reused per-object id for a variable name (invariant: identity)."""
+        if not hasattr(self, '_oids'):
+            self._oids, self._oid_seq = {}, 0
+        if name not in self._oids:
+            self._oid_seq += 1
+            self._oids[name] = f'o{self._oid_seq}'
+        return self._oids[name]
+
+    def _deep_unwrap(self, cursor):
+        c, seen = cursor, 0
+        while c is not None and seen < 20:
+            nxt = self._unwrap(c)
+            if nxt is c or nxt is None:
+                break
+            c, seen = nxt, seen + 1
+        return c
+
+    def _cause_operand(self, cursor):
+        """Return (READ-op | None, value). A variable operand yields a READ node
+        carrying a stable-oid name-reference; a literal yields no node."""
+        c = self._deep_unwrap(cursor)
+        val = self._to_int(self._eval(cursor))
+        if c is not None and c.kind == CK.DECL_REF_EXPR and c.spelling:
+            nm = c.spelling
+            return ({'op': 'READ',
+                     'ref': {'kind': 'name', 'name': nm, 'oid': self._oid_for(nm)},
+                     'value': val}, val)
+        return (None, val)
+
+    def _build_cause_chain(self, target_name: str, init_cursor, result_val):
+        """Ordered causal chain for a scalar assignment, or None if unsupported."""
+        try:
+            c = self._deep_unwrap(init_cursor)
+            if c is None:
+                return None
+            if c.kind == CK.BINARY_OPERATOR:
+                op = self._get_binary_op(c)
+                if op not in ('+', '-', '*', '/', '%'):
+                    return None
+                ch = self._ch(c)
+                if len(ch) < 2:
+                    return None
+                left_op, left_val = self._cause_operand(ch[0])
+                right_op, right_val = self._cause_operand(ch[1])
+                chain = []
+                if left_op:  chain.append(left_op)
+                if right_op: chain.append(right_op)
+                res = self._to_int(result_val)
+                chain.append({'op': 'COMPUTE', 'operator': op,
+                              'operands': [left_val, right_val], 'value': res})
+                chain.append({'op': 'WRITE',
+                              'ref': {'kind': 'name', 'name': target_name,
+                                      'oid': self._oid_for(target_name)},
+                              'value': res})
+                return chain
+            if c.kind == CK.DECL_REF_EXPR and c.spelling:
+                nm = c.spelling
+                val = self._to_int(self._eval(init_cursor))
+                return [
+                    {'op': 'READ',
+                     'ref': {'kind': 'name', 'name': nm, 'oid': self._oid_for(nm)},
+                     'value': val},
+                    {'op': 'WRITE',
+                     'ref': {'kind': 'name', 'name': target_name,
+                             'oid': self._oid_for(target_name)},
+                     'value': val},
+                ]
+            return None
+        except Exception:
+            return None
 
     def _emit(self, line: int, description: str, event: dict):
         self.step_count += 1
