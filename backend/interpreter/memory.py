@@ -47,8 +47,11 @@ class Memory:
     # ── Stack frames ───────────────────────────────────────────────────
 
     def push_frame(self, func_name: str, line: int):
+        # A call activation is itself a runtime object — mint its identity at
+        # birth so the frontend can tell two invocations of the same function
+        # apart (sibling calls must not "morph" into each other).
         self.stack.append({'function': func_name, 'line': line,
-                           'variables': {}, '_oids': {}})
+                           'variables': {}, '_oids': {}, 'oid': self.mint_oid()})
 
     def pop_frame(self):
         if self.stack:

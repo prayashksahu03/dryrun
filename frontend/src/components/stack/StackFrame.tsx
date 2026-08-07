@@ -2,6 +2,7 @@ import { motion } from 'framer-motion';
 import { StackFrameData, VariableValue } from '../../types/trace';
 import { useExecutionStore } from '../../store/executionStore';
 import StackVariable from './StackVariable';
+import { getVisualIdentity } from '../../utils/visualIdentity';
 import ArrayViz, { ArrayPointer } from '../arrays/ArrayViz';
 import StringViz from '../arrays/StringViz';
 import HeapTreeViz from '../arrays/HeapTreeViz';
@@ -328,7 +329,7 @@ export default function StackFrameComponent({
 
           return (
             <StackVariable
-              key={name}
+              key={getVisualIdentity(val, name)}
               frameName={frame.function}
               name={name}
               value={val}
