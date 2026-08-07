@@ -34,11 +34,20 @@ export interface MemorySnapshot {
   heap: Record<string, HeapBlock>;
 }
 
+// TRACE_CONTRACT_v2 (slice 1): an ordered, self-describing causal chain.
+// A reference descriptor names WHAT an op touches, with a stable per-object oid.
+export type CauseRef = { kind: 'name' | 'cell' | 'pointee'; name?: string; via?: string; oid: string };
+export type CauseOp =
+  | { op: 'READ';    ref: CauseRef; value: number }
+  | { op: 'COMPUTE'; operator: string; operands: number[]; value: number }
+  | { op: 'DEREF';   ref: CauseRef; target?: { name?: string; oid: string } }
+  | { op: 'WRITE';   ref: CauseRef; value: number };
+
 export type StepEvent =
   | { type: 'start' }
   | { type: 'malloc';  address: string; size: number; typeName: string }
   | { type: 'free';    address: string }
-  | { type: 'assign';  target: string; value: string }
+  | { type: 'assign';  target: string; value: string; cause?: CauseOp[] }
   | { type: 'call';    function: string; args?: string[] }
   | { type: 'return';  function: string; value?: string }
   | { type: 'crash';   kind: CrashKind; address?: string; message: string }

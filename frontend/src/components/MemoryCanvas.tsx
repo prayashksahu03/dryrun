@@ -5,6 +5,7 @@ import StackZone from './stack/StackZone';
 import HeapZone from './heap/HeapZone';
 import ArrowLayer from './arrows/ArrowLayer';
 import HintCard from './HintCard';
+import CauseRibbon from './CauseRibbon';
 import { resolveHints } from '../data/guided';
 
 const MIN_PCT = 18;
@@ -23,6 +24,11 @@ export default function MemoryCanvas() {
     [trace, activeGuidedProgram],
   );
   const currentHint = resolvedHints.get(currentStep);
+
+  // TRACE_CONTRACT_v2 slice 1: render the emitted causal chain, if any, 1:1.
+  const _frame = trace ? trace.steps[currentStep] : null;
+  const cause = _frame && _frame.event.type === 'assign' ? _frame.event.cause : undefined;
+
   const showStack = panels['stack' as PanelKey];
   const showHeap  = panels['heap'  as PanelKey];
   const [tick, setTick]         = useState(0);
@@ -88,6 +94,9 @@ export default function MemoryCanvas() {
           cursor:     dragging ? 'row-resize' : undefined,
         }}
       >
+        {/* Cause ribbon (TRACE_CONTRACT_v2 slice 1) — top strip when a step declares a cause */}
+        {cause && <CauseRibbon cause={cause} />}
+
         {/* Dot grid */}
         <div
           className="absolute inset-0 pointer-events-none"
