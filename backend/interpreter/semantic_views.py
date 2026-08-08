@@ -681,11 +681,16 @@ def _annotate_graph(trace: list) -> None:
             first_live = i
 
     if first_live is None:
-        return
+        return  # this run never traverses a graph — don't render incidental arrays
 
+    # The run IS a graph traversal (confirmed by first_live), so render the graph
+    # from the EARLIEST step its structure exists — i.e. as vertices and edges are
+    # assigned, the graph builds up edge by edge, before the traversal loop starts.
+    # (The `first_live` confirmation is what still keeps a boolean DP table, which
+    # never traverses, from being drawn as a graph.)
     for i, step in enumerate(trace):
         st = structures[i]
-        if st is None or i < first_live:
+        if st is None:
             continue
         oid, n, mat, directed, wmat = st
         edges = (_weighted_matrix_to_edges(mat, wmat, n, directed)
