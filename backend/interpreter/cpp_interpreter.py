@@ -5316,7 +5316,60 @@ class CppInterpreter:
             outer_arr = self._read_this_field(real_name, line)
             is_this   = True
 
-        if not isinstance(outer_arr, dict) or outer_arr.get('kind') != 'array':
+        if not isinstance(outer_arr, dict):
+            return _INT(0)
+
+        # ── map value mutation: adj[key].push_back(v) on a map<K, vector<T>> ──
+        # operator[] on a map returns a reference to the (auto-created) value, so
+        # the method must mutate the value stored IN the map. Previously this path
+        # only handled kind=='array' and silently dropped map mutations — which is
+        # why adjacency lists built with `adj[u].push_back(v)` came out empty.
+        if outer_arr.get('kind') == 'map':
+            raw_key = self._eval(self._unwrap(idx_c) or idx_c)
+            mkey    = self._make_map_key(raw_key)
+            data    = outer_arr.setdefault('data', {})
+            inner   = data.get(mkey)
+            if not (isinstance(inner, dict) and inner.get('kind') == 'array'):
+                inner = {'kind': 'array', 'values': []}   # default-constructed vector
+                data[mkey] = inner
+            inner_vals = list(inner.get('values', []))
+
+            def _persist():
+                data[mkey] = inner
+                if is_this:
+                    self._write_this_field(real_name, outer_arr, line)
+                elif real_name:
+                    self.memory.set_var(real_name, outer_arr)
+                self.memory.update_line(line)
+
+            if method_name == 'push_back':
+                stored = self._arr_push(inner, args[0] if args else _INT(0))
+                _persist()
+                self._emit(line, f"{real_name}[{mkey}].push_back({self._fmt(stored)}).",
+                           {'type': 'assign', 'target': f'{real_name}[{mkey}]', 'value': self._fmt(stored)})
+                return _INT(0)
+            if method_name == 'pop_back':
+                if inner_vals:
+                    inner['values'] = inner_vals[:-1]
+                    _persist()
+                return _INT(0)
+            if method_name == 'clear':
+                inner['values'] = []
+                _persist()
+                return _INT(0)
+            if method_name == 'size':
+                return _INT(len(inner_vals))
+            if method_name == 'empty':
+                return _INT(int(len(inner_vals) == 0))
+            if method_name == 'back':
+                v = inner_vals[-1] if inner_vals else _INT(0)
+                return v if isinstance(v, dict) else _INT(int(v))
+            if method_name == 'front':
+                v = inner_vals[0] if inner_vals else _INT(0)
+                return v if isinstance(v, dict) else _INT(int(v))
+            return _INT(0)
+
+        if outer_arr.get('kind') != 'array':
             return _INT(0)
 
         vals = outer_arr.get('values', [])
@@ -6414,6 +6467,16 @@ class CppInterpreter:
         # Exclude iterator types (std::vector<int>::iterator is NOT a vector variable)
         if '::iterator' in type_spell or '::const_iterator' in type_spell:
             return False
+        # A container whose VALUE type contains vector<...> (e.g.
+        # map<int, vector<int>>, priority_queue<int, vector<int>>) must not be
+        # mistaken for a vector just because the string contains "vector<". Look
+        # at the OUTERMOST template only.
+        t = re.sub(r'^(const|volatile)\s+', '', type_spell.replace('std::', '').lstrip()).lstrip()
+        _NON_VEC_OUTER = ('map<', 'unordered_map<', 'multimap<', 'set<',
+                          'unordered_set<', 'multiset<', 'pair<', 'tuple<',
+                          'queue<', 'stack<', 'deque<', 'priority_queue<')
+        if any(t.startswith(p) for p in _NON_VEC_OUTER):
+            return False
         return 'vector<' in type_spell or type_spell == 'vector'
 
     def _is_class_type(self, type_spell: str) -> bool:
@@ -6498,9 +6561,37 @@ class CppInterpreter:
             c, seen = nxt, seen + 1
         return c
 
+    def _subscript_cell_ref(self, sub_c):
+        """Cell reference {kind:'cell', name, container_oid, index} for a 1D
+        subscript — either a C-array `arr[idx]` (ARRAY_SUBSCRIPT_EXPR) or a
+        container `vec[idx]` (CALL_EXPR 'operator[]'). Returns None for a nested
+        (2D) base — 2D cell addressing in the cause chain is a later slice."""
+        try:
+            ch = self._ch(sub_c)
+            if len(ch) < 2:
+                return None
+            base = self._deep_unwrap(ch[0])
+            if base is None:
+                return None
+            # Nested subscript (dp[i][j]) → defer 2D to a later slice.
+            if base.kind == CK.ARRAY_SUBSCRIPT_EXPR or (
+                    base.kind == CK.CALL_EXPR and base.spelling == 'operator[]'):
+                return None
+            arr_name = self._cursor_name(base)
+            if not arr_name:
+                return None
+            idx = self._to_int(self._eval(ch[-1]))
+            return {'kind': 'cell', 'name': arr_name,
+                    'container_oid': self._oid_for(arr_name), 'index': idx}
+        except Exception:
+            return None
+
     def _cause_operand(self, cursor):
         """Return (READ-op | None, value). A variable operand yields a READ node
-        carrying a stable-oid name-reference; a literal yields no node."""
+        carrying a stable-oid name-reference; an array-subscript operand yields a
+        READ node carrying a CELL reference (so a self-referential recurrence like
+        dp[i]=dp[i-1]+dp[i-2] exposes which cells it depended on); a literal yields
+        no node."""
         c = self._deep_unwrap(cursor)
         val = self._to_int(self._eval(cursor))
         if c is not None and c.kind == CK.DECL_REF_EXPR and c.spelling:
@@ -6508,6 +6599,11 @@ class CppInterpreter:
             return ({'op': 'READ',
                      'ref': {'kind': 'name', 'name': nm, 'oid': self._oid_for(nm)},
                      'value': val}, val)
+        if c is not None and (c.kind == CK.ARRAY_SUBSCRIPT_EXPR
+                or (c.kind == CK.CALL_EXPR and c.spelling == 'operator[]')):
+            cell = self._subscript_cell_ref(c)
+            if cell is not None:
+                return ({'op': 'READ', 'ref': cell, 'value': val}, val)
         return (None, val)
 
     def _rhs_cause_ops(self, init_cursor, result_val):

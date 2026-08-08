@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from interpreter.interpreter import CInterpreter
 from interpreter.cpp_interpreter import CppInterpreter
 from interpreter.python_tracer import PythonTracer
+from interpreter.semantic_views import annotate_trace
 
 app = FastAPI(title="MemTrace Backend")
 
@@ -33,7 +34,7 @@ async def execute(req: ExecuteRequest):
         if lang == 'python':
             tracer = PythonTracer(req.source)
             trace = tracer.run()
-            return {"trace": trace, "source": req.source}
+            return {"trace": annotate_trace(trace), "source": req.source}
 
         if lang in ('cpp', 'c++'):
             interp = CppInterpreter(req.source, stdin_data=req.stdin_input)
@@ -41,7 +42,7 @@ async def execute(req: ExecuteRequest):
             interp = CInterpreter(req.source)
 
         trace = interp.run()
-        return {"trace": trace, "source": req.source}
+        return {"trace": annotate_trace(trace), "source": req.source}
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

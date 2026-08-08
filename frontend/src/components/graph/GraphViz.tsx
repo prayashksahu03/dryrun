@@ -1,200 +1,13 @@
 import { motion } from 'framer-motion';
-import { MemorySnapshot } from '../../types/trace';
+import { GraphDescriptor, ExecutionDescriptor } from '../../types/trace';
 
-// ── Detection ──────────────────────────────────────────────────────────
+// TRACE_CONTRACT_v2, slice 1 — pure renderer.
 //
-// Heuristics for "this is an adjacency matrix":
-//   1. Square 2D array (rows == cols), size 2..12
-//   2. Every value is 0 or 1
-//   3. Diagonal is all 0  (no self-loops)
-//
-// Directed vs undirected: adj[i][j] == adj[j][i] for all i,j → undirected.
-// Visited array: 1D array of same length with only 0/1 values.
-// DFS state: `node` and `parent` int variables in the innermost frame.
-
-export interface GraphData {
-  n: number;
-  adj: number[][];
-  directed: boolean;
-  visited: number[] | null;
-  currentNode: number | null;
-  parentNode: number | null;
-  edgeWeights?: number[][];
-}
-
-function* iterFrameArrays(memory: MemorySnapshot, skip?: Set<string>) {
-  for (const frame of memory.stack) {
-    for (const [name, val] of Object.entries(frame.variables)) {
-      if (!skip?.has(name)) yield { name, val };
-      // Also yield arrays nested one level inside structs (C++ class fields)
-      if (val.kind === 'struct' && val.fields) {
-        for (const [fname, fv] of Object.entries(val.fields as Record<string, typeof val>)) {
-          yield { name: `${name}.${fname}`, val: fv };
-        }
-      }
-    }
-  }
-}
-
-const CURRENT_NODE_VARS = ['u', 'node', 'curr', 'current', 'v', 'src', 'source', 'vertex', 'start'];
-const PARENT_NODE_VARS  = ['parent', 'prev', 'p', 'par'];
-
-function findTraversalState(memory: MemorySnapshot, n: number) {
-  // ── visited / dist array (length n, all 0|1) ──
-  let visited: number[] | null = null;
-  for (const f of memory.stack) {
-    for (const vval of Object.values(f.variables)) {
-      if (vval.kind !== 'array' || vval.rows) continue;
-      const arr = vval.values as number[];
-      if (!Array.isArray(arr) || arr.length !== n) continue;
-      if (arr.every(v => v === 0 || v === 1)) { visited = arr; break; }
-    }
-    if (visited) break;
-  }
-
-  // ── current node from innermost frame ──
-  let currentNode: number | null = null;
-  let parentNode:  number | null = null;
-  const innermost = memory.stack[memory.stack.length - 1];
-  if (innermost) {
-    for (const name of CURRENT_NODE_VARS) {
-      const nv = innermost.variables[name];
-      if (nv?.kind === 'int' && nv.value >= 0 && nv.value < n) {
-        currentNode = nv.value;
-        break;
-      }
-    }
-    for (const name of PARENT_NODE_VARS) {
-      const pv = innermost.variables[name];
-      if (pv?.kind === 'int' && pv.value >= 0 && pv.value < n) {
-        parentNode = pv.value;
-        break;
-      }
-    }
-  }
-
-  return { visited, currentNode, parentNode };
-}
-
-export function detectGraph(
-  memory: MemorySnapshot,
-  options?: { skip?: Set<string>; pairDestFields?: Record<string, 'first' | 'second'> },
-): GraphData | null {
-  const skip = options?.skip;
-  const pairDestFields = options?.pairDestFields ?? {};
-
-  for (const { name, val } of iterFrameArrays(memory, skip)) {
-    if (val.kind !== 'array') continue;
-
-    let n: number;
-    let mat: number[][];
-
-    // ── Adjacency matrix: NxN array of 0/1, rows/cols set ──────────────
-    if (val.rows && val.cols && val.rows === val.cols) {
-      n = val.rows;
-      if (n < 2 || n > 12) continue;
-      const raw = val.values as number[][];
-      if (!Array.isArray(raw) || raw.length !== n) continue;
-      if (!raw.every(row => Array.isArray(row) && row.length >= n &&
-                    row.slice(0, n).every(v => v === 0 || v === 1))) continue;
-      mat = raw;
-
-    // ── Adjacency list: 1D array of arrays, each element is neighbor list ──
-    } else if (!val.rows && !val.cols) {
-      type PairEl = { kind: 'struct'; fields: { first: { value: number }; second: { value: number } } };
-      type InnerEl = number | PairEl;
-      const outer = val.values as Array<{ kind: string; values: InnerEl[] }>;
-      if (!Array.isArray(outer)) continue;
-      n = outer.length;
-      if (n < 2 || n > 12) continue;
-
-      // Detect whether neighbors are plain ints or weighted pairs {first:weight, second:dest}
-      const isPairNeighbors = outer.some(el =>
-        el && el.kind === 'array' && Array.isArray(el.values) && el.values.length > 0 &&
-        typeof el.values[0] === 'object' && (el.values[0] as PairEl)?.kind === 'struct',
-      );
-
-      // Determine which pair field is the node index by scanning ALL pairs.
-      // Collect every first/second value; if any first is out of [0,n) → first can't be dest.
-      let firstCanBeDest = true;
-      let secondCanBeDest = true;
-      for (const el of outer) {
-        if (!el || el.kind !== 'array' || !Array.isArray(el.values)) continue;
-        for (const nb of el.values) {
-          if (typeof nb !== 'object' || nb.kind !== 'struct' || !nb.fields) continue;
-          const fv = nb.fields.first?.value;
-          const sv = nb.fields.second?.value;
-          if (typeof fv === 'number' && (fv < 0 || fv >= n)) firstCanBeDest = false;
-          if (typeof sv === 'number' && (sv < 0 || sv >= n)) secondCanBeDest = false;
-        }
-      }
-      // User hint overrides auto-detection; fallback: prefer first unless ruled out
-      const destField: 'first' | 'second' =
-        pairDestFields[name] ??
-        ((!firstCanBeDest && secondCanBeDest) ? 'second' : 'first');
-      const weightField = destField === 'first' ? 'second' : 'first';
-
-      const getNeighborDest = (v: InnerEl): number | null => {
-        if (typeof v === 'number') return v >= 0 && v < n ? v : null;
-        if (typeof v === 'object' && v.kind === 'struct' && v.fields) {
-          const dest = v.fields[destField]?.value;
-          return typeof dest === 'number' && dest >= 0 && dest < n ? dest : null;
-        }
-        return null;
-      };
-      const getNeighborWeight = (v: InnerEl): number => {
-        if (typeof v === 'object' && v.kind === 'struct' && v.fields) {
-          const w = v.fields[weightField]?.value;
-          return typeof w === 'number' ? w : 1;
-        }
-        return 1;
-      };
-
-      // Every element must be an inner array whose neighbors resolve to valid node indices
-      if (!outer.every(el =>
-        el && el.kind === 'array' && Array.isArray(el.values) &&
-        el.values.every(v => getNeighborDest(v) !== null),
-      )) continue;
-
-      // Build NxN adjacency matrix and weight matrix from neighbor lists
-      mat = Array.from({ length: n }, () => new Array(n).fill(0));
-      const wmat: number[][] = Array.from({ length: n }, () => new Array(n).fill(0));
-      for (let i = 0; i < n; i++) {
-        for (const nb of outer[i].values) {
-          const dest = getNeighborDest(nb);
-          if (dest !== null) {
-            mat[i][dest] = 1;
-            wmat[i][dest] = getNeighborWeight(nb);
-          }
-        }
-      }
-      // Reject if no edges at all (empty graph not useful to show)
-      if (mat.every(row => row.every(v => v === 0))) continue;
-
-      const isSymmetricW = mat.every((row, i) =>
-        row.slice(0, n).every((v, j) => v === mat[j]?.[i]),
-      );
-
-      const { visited: visW, currentNode: curW, parentNode: parW } = findTraversalState(memory, n);
-      return {
-        n, adj: mat, directed: !isSymmetricW,
-        visited: visW, currentNode: curW, parentNode: parW,
-        edgeWeights: isPairNeighbors ? wmat : undefined,
-      };
-
-    } else {
-      continue;
-    }
-
-    const isSymmetric = mat.every((row, i) =>
-      row.slice(0, n).every((v, j) => v === mat[j]?.[i]),
-    );
-
-    const { visited, currentNode, parentNode } = findTraversalState(memory, n);
-    return { n, adj: mat, directed: !isSymmetric, visited, currentNode, parentNode };
-  }
-  return null;
-}
+// GraphViz draws the interpreter-declared GraphDescriptor and ExecutionDescriptor
+// 1:1. It performs ZERO inference: it does not detect that a structure is a
+// graph, does not decide which object is the frontier, and does not read raw
+// memory. Structure (nodes/edges/directedness) and roles (current/frontier/
+// visited) are facts declared per step by the backend semantic-view resolver.
 
 // ── Layout helpers ─────────────────────────────────────────────────────
 
@@ -223,8 +36,29 @@ const NODE_R = 17;
 
 // ── Component ──────────────────────────────────────────────────────────
 
-export default function GraphViz({ data }: { data: GraphData }) {
-  const { n, adj, directed, visited, currentNode, parentNode, edgeWeights } = data;
+export default function GraphViz({
+  graph,
+  execution,
+}: {
+  graph: GraphDescriptor;
+  execution?: ExecutionDescriptor | null;
+}) {
+  const { nodes, edges, directed } = graph;
+  const n = nodes.length;
+
+  // Node id → layout slot. Slice-1 nodes are 0..n-1, but map explicitly so
+  // arbitrary node ids (later slices) render correctly.
+  const slotOf = new Map<number, number>();
+  nodes.forEach((id, i) => slotOf.set(id, i));
+
+  const current  = execution?.current ?? null;
+  const parent   = execution?.parent ?? null;
+  const visitedSet  = new Set(execution?.visited ?? []);
+  const frontierSet = new Set(execution?.frontier?.members ?? []);
+  const algorithm   = execution?.algorithm ?? null;
+  const distVals    = execution?.distance?.values ?? null;
+  const fmtDist = (v: number) => (v >= 1e8 ? '∞' : String(v));
+  const hasWeights  = edges.some(e => e.w !== undefined);
 
   const W = 340;
   const H = n <= 4 ? 230 : n <= 6 ? 270 : n <= 8 ? 300 : 330;
@@ -233,9 +67,10 @@ export default function GraphViz({ data }: { data: GraphData }) {
   const layoutR = n <= 3 ? 72 : n <= 4 ? 86 : n <= 6 ? 100 : n <= 8 ? 112 : 125;
 
   const pos = circularPos(n, cx, cy, layoutR);
+  const posOf = (id: number) => pos[slotOf.get(id) ?? 0];
 
-  const edgeColor   = 'rgba(99,102,241,0.22)';
-  const activeEdge  = 'rgba(251,191,36,0.85)';
+  const edgeColor  = 'rgba(99,102,241,0.22)';
+  const activeEdge = 'rgba(251,191,36,0.85)';
 
   return (
     <div className="flex flex-col">
@@ -244,9 +79,17 @@ export default function GraphViz({ data }: { data: GraphData }) {
         <span className="text-[9px] font-mono text-zinc-600 tracking-wide">
           {n} nodes · {directed ? 'directed' : 'undirected'} graph
         </span>
+        {algorithm && (
+          <span className="text-[8px] font-mono text-zinc-500 px-1.5 py-0.5 rounded border border-zinc-700/60 bg-zinc-800/40">
+            {algorithm}
+          </span>
+        )}
         <div className="flex items-center gap-2 ml-auto">
-          {visited && <Legend color="rgba(34,197,94,0.7)" label="visited" />}
-          {currentNode !== null && <Legend color="#fbbf24" label="active" />}
+          {visitedSet.size > 0 && <Legend color="rgba(34,197,94,0.7)" label="visited" />}
+          {frontierSet.size > 0 && (
+            <Legend color="rgba(56,189,248,0.85)" label={execution?.frontier?.kind === 'stack' ? 'on stack' : 'in queue'} />
+          )}
+          {current !== null && <Legend color="#fbbf24" label="active" />}
         </div>
       </div>
 
@@ -265,71 +108,76 @@ export default function GraphViz({ data }: { data: GraphData }) {
         </defs>
 
         {/* ── Edges ── */}
-        {adj.flatMap((row, i) =>
-          row.map((connected, j) => {
-            if (!connected) return null;
-            if (!directed && j <= i) return null; // skip duplicate in undirected
+        {edges.map((e, idx) => {
+          const a = posOf(e.u);
+          const b = posOf(e.v);
+          if (!a || !b) return null;
 
-            const isActive =
-              (i === currentNode && j === parentNode) ||
-              (!directed && j === currentNode && i === parentNode);
+          const isActive =
+            (e.u === current && e.v === parent) ||
+            (!directed && e.v === current && e.u === parent);
 
-            const ep = shrinkEndpoints(pos[i].x, pos[i].y, pos[j].x, pos[j].y, NODE_R + 2);
+          const ep = shrinkEndpoints(a.x, a.y, b.x, b.y, NODE_R + 2);
+          const mx = (a.x + b.x) / 2;
+          const my = (a.y + b.y) / 2;
 
-            const weight = edgeWeights?.[i]?.[j];
-            const mx = (pos[i].x + pos[j].x) / 2;
-            const my = (pos[i].y + pos[j].y) / 2;
-
-            return (
-              <g key={`e${i}-${j}`}>
-                <motion.line
-                  x1={ep.x1} y1={ep.y1} x2={ep.x2} y2={ep.y2}
-                  animate={{
-                    stroke:      isActive ? activeEdge : edgeColor,
-                    strokeWidth: isActive ? 2.5 : 1.5,
-                    opacity:     isActive ? 1 : 0.9,
-                  }}
-                  transition={{ duration: 0.28 }}
-                  strokeLinecap="round"
-                  markerEnd={directed ? (isActive ? 'url(#gv-arrow-active)' : 'url(#gv-arrow)') : undefined}
-                />
-                {weight !== undefined && (
-                  <text
-                    x={mx} y={my - 5}
-                    textAnchor="middle"
-                    dominantBaseline="middle"
-                    fontSize={8}
-                    fill={isActive ? '#fbbf24' : 'rgba(161,161,170,0.7)'}
-                    style={{ pointerEvents: 'none', userSelect: 'none' }}
-                  >
-                    {weight}
-                  </text>
-                )}
-              </g>
-            );
-          }),
-        )}
+          return (
+            <g key={`e${idx}-${e.u}-${e.v}`}>
+              <motion.line
+                x1={ep.x1} y1={ep.y1} x2={ep.x2} y2={ep.y2}
+                animate={{
+                  stroke:      isActive ? activeEdge : edgeColor,
+                  strokeWidth: isActive ? 2.5 : 1.5,
+                  opacity:     isActive ? 1 : 0.9,
+                }}
+                transition={{ duration: 0.28 }}
+                strokeLinecap="round"
+                markerEnd={directed ? (isActive ? 'url(#gv-arrow-active)' : 'url(#gv-arrow)') : undefined}
+              />
+              {e.w !== undefined && (
+                <text
+                  x={mx} y={my - 5}
+                  textAnchor="middle"
+                  dominantBaseline="middle"
+                  fontSize={8}
+                  fill={isActive ? '#fbbf24' : 'rgba(161,161,170,0.7)'}
+                  style={{ pointerEvents: 'none', userSelect: 'none' }}
+                >
+                  {e.w}
+                </text>
+              )}
+            </g>
+          );
+        })}
 
         {/* ── Nodes ── */}
-        {pos.map((p, i) => {
-          const isVisited  = visited ? visited[i] === 1 : false;
-          const isCurrent  = i === currentNode;
-          const isParent   = i === parentNode;
+        {nodes.map((id, i) => {
+          const p = pos[i];
+          const isVisited  = visitedSet.has(id);
+          const isCurrent  = id === current;
+          const isParent   = id === parent;
+          // A node waiting in the frontier (the wavefront). Since BFS marks
+          // nodes visited as it enqueues them, "in queue" distinguishes nodes
+          // still waiting from nodes already processed (dequeued).
+          const isFrontier = frontierSet.has(id) && !isCurrent;
 
-          const fill   = isCurrent ? 'rgba(251,191,36,0.16)' :
-                         isParent  ? 'rgba(99,102,241,0.16)' :
-                         isVisited ? 'rgba(34,197,94,0.10)' :
+          const fill   = isCurrent  ? 'rgba(251,191,36,0.16)' :
+                         isFrontier ? 'rgba(56,189,248,0.16)' :
+                         isParent   ? 'rgba(99,102,241,0.16)' :
+                         isVisited  ? 'rgba(34,197,94,0.10)' :
                          'rgba(15,15,20,0.95)';
-          const stroke = isCurrent ? '#fbbf24' :
-                         isParent  ? 'rgba(129,140,248,0.75)' :
-                         isVisited ? 'rgba(34,197,94,0.55)' :
+          const stroke = isCurrent  ? '#fbbf24' :
+                         isFrontier ? 'rgba(56,189,248,0.85)' :
+                         isParent   ? 'rgba(129,140,248,0.75)' :
+                         isVisited  ? 'rgba(34,197,94,0.55)' :
                          'rgba(63,63,70,0.45)';
-          const textFill = isCurrent ? '#fbbf24' :
-                           isVisited ? '#86efac' :
+          const textFill = isCurrent  ? '#fbbf24' :
+                           isFrontier ? '#7dd3fc' :
+                           isVisited  ? '#86efac' :
                            '#52525b';
 
           return (
-            <g key={`n${i}`}>
+            <g key={`n${id}`}>
               {/* Outer glow ring — always rendered, opacity-animated */}
               <motion.circle
                 cx={p.x} cy={p.y} r={NODE_R + 7}
@@ -348,7 +196,7 @@ export default function GraphViz({ data }: { data: GraphData }) {
                 transition={{ duration: 0.28 }}
               />
 
-              {/* Node index */}
+              {/* Node id */}
               <text
                 x={p.x}
                 y={p.y + 1}
@@ -359,12 +207,33 @@ export default function GraphViz({ data }: { data: GraphData }) {
                 fontWeight={isCurrent ? 'bold' : 'normal'}
                 style={{ pointerEvents: 'none', userSelect: 'none' }}
               >
-                {i}
+                {id}
               </text>
+
+              {/* Per-node distance (Dijkstra/weighted) — the value updates while
+                  the node's identity/position stays fixed. */}
+              {distVals && i < distVals.length && (
+                <text
+                  x={p.x}
+                  y={p.y + NODE_R + 9}
+                  textAnchor="middle"
+                  dominantBaseline="middle"
+                  fontSize={9}
+                  fill={isCurrent ? '#fbbf24' : isFrontier ? '#7dd3fc' : '#818cf8'}
+                  style={{ pointerEvents: 'none', userSelect: 'none' }}
+                >
+                  {fmtDist(distVals[id])}
+                </text>
+              )}
             </g>
           );
         })}
       </svg>
+
+      {/* Weighted-graph hint (kept subtle; weights render on the edges) */}
+      {hasWeights && (
+        <span className="text-[8px] font-mono text-zinc-700 mt-1">weighted</span>
+      )}
     </div>
   );
 }

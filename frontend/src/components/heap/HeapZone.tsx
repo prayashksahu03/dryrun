@@ -6,7 +6,8 @@ import HeapBlockComponent from './HeapBlock';
 import { getVisualIdentity } from '../../utils/visualIdentity';
 import TreeView from './TreeView';
 import TrieView, { findTrieRoot } from './TrieView';
-import GraphViz, { detectGraph } from '../graph/GraphViz';
+import GraphViz from '../graph/GraphViz';
+import GridView from '../graph/GridView';
 import SegTreeViz from '../arrays/SegTreeViz';
 
 function isTreeHeap(heap: Record<string, HeapBlock>): boolean {
@@ -102,27 +103,23 @@ export default function HeapZone() {
 
   const entries = Object.entries(heap);
 
-  // ── Graph detection runs REGARDLESS of heap contents ─────────────────────
-  // A graph traversal (BFS/DFS) almost always allocates its adjacency vectors on
-  // the heap, so gating the graph on an empty heap hid it exactly when it
-  // mattered most. When the heap is non-empty we require traversal state (a
-  // visited set or a current node) so an incidental 2D array (e.g. a DP table)
-  // isn't mistaken for a graph.
-  const skipVars = new Set(
-    Object.entries(vizHints)
-      .filter(([, h]) => h.kind === 'grid' || h.kind === 'struct')
-      .map(([n]) => n),
-  );
-  const pairDestFields: Record<string, 'first' | 'second'> = {};
-  for (const [n, h] of Object.entries(vizHints)) {
-    if (h.kind === 'pair_order') pairDestFields[n] = h.destField;
+  // ── Semantic views: render the interpreter-declared descriptors 1:1 ──────
+  // Structure and roles are declared per step by the backend semantic-view
+  // resolver — the frontend performs ZERO detection. A grid is a projection
+  // (rendered natively as cells), so it takes precedence over the graph reading;
+  // a step never carries both. Descriptors persist once a run's traversal
+  // begins, so the view never vanishes when the frontier drains.
+  if (frame.grid) {
+    return (
+      <div className="flex-1 overflow-y-auto p-2 flex items-start justify-center">
+        <GridView grid={frame.grid} execution={frame.execution} />
+      </div>
+    );
   }
-  const graph = detectGraph(frame.memory, { skip: skipVars, pairDestFields });
-  const graphHasTraversal = !!graph && (graph.visited != null || graph.currentNode != null);
-  if (graph && (entries.length === 0 || graphHasTraversal)) {
+  if (frame.graph) {
     return (
       <div className="flex-1 overflow-y-auto">
-        <GraphViz data={graph} />
+        <GraphViz graph={frame.graph} execution={frame.execution} />
       </div>
     );
   }

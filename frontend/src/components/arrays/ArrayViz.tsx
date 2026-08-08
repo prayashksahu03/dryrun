@@ -49,6 +49,7 @@ function Array1D({
   pointers,
   windowLeft,
   windowRight,
+  dependsOn,
 }: {
   name: string;
   values: number[];
@@ -56,7 +57,9 @@ function Array1D({
   pointers?: ArrayPointer[];
   windowLeft?: number;
   windowRight?: number;
+  dependsOn?: number[];
 }) {
+  const depSet = new Set(dependsOn ?? []);
   // lastWrite.length === 1 → single highlight; length === 2 → swap dual-highlight
   const hi   = lastWrite?.length === 1 ? lastWrite[0] : -1;
   const swap0 = lastWrite?.length === 2 ? lastWrite[0] : -1;
@@ -109,6 +112,8 @@ function Array1D({
             const inWin   = windowLeft !== undefined && windowRight !== undefined && i >= windowLeft && i <= windowRight;
             const ptrs    = ptrMap.get(i);
             const isPointed = !!ptrs?.length;
+            // A cell the current recurrence read to compute the active cell.
+            const isDep   = depSet.has(i) && !isHi && !isSwap && !isPointed;
 
             const bgColor = isSwap
               ? 'rgba(167,139,250,0.22)'
@@ -116,25 +121,31 @@ function Array1D({
                 ? `${pointerColor(ptrs![0].name)}18`
                 : isHi
                   ? 'rgba(251,191,36,0.18)'
-                  : inWin
-                    ? 'rgba(99,102,241,0.08)'
-                    : 'rgba(24,24,27,0.9)';
+                  : isDep
+                    ? 'rgba(129,140,248,0.16)'
+                    : inWin
+                      ? 'rgba(99,102,241,0.08)'
+                      : 'rgba(24,24,27,0.9)';
             const bdColor = isSwap
               ? 'rgba(167,139,250,0.7)'
               : isPointed
                 ? `${pointerColor(ptrs![0].name)}80`
                 : isHi
                   ? 'rgba(251,191,36,0.6)'
-                  : inWin
-                    ? 'rgba(99,102,241,0.4)'
-                    : 'rgba(63,63,70,0.5)';
+                  : isDep
+                    ? 'rgba(129,140,248,0.7)'
+                    : inWin
+                      ? 'rgba(99,102,241,0.4)'
+                      : 'rgba(63,63,70,0.5)';
             const txtColor = isSwap
               ? '#c4b5fd'
               : isPointed
                 ? pointerColor(ptrs![0].name)
                 : isHi
                   ? '#fbbf24'
-                  : '#a1a1aa';
+                  : isDep
+                    ? '#a5b4fc'
+                    : '#a1a1aa';
 
             return (
               <div key={i} className="flex flex-col items-center" style={{ minWidth: CELL_W }}>
@@ -347,6 +358,7 @@ export default function ArrayViz({
   pointers,
   windowLeft,
   windowRight,
+  dependsOn,
 }: {
   name: string;
   values: number[] | number[][] | unknown[];
@@ -356,6 +368,7 @@ export default function ArrayViz({
   pointers?: ArrayPointer[];
   windowLeft?: number;
   windowRight?: number;
+  dependsOn?: number[];
 }) {
   // Non-primitive elements — route by element kind
   if (!rows && !cols && values.length > 0 && typeof values[0] === 'object' && values[0] !== null && !Array.isArray(values[0])) {
@@ -370,6 +383,7 @@ export default function ArrayViz({
           pointers={pointers}
           windowLeft={windowLeft}
           windowRight={windowRight}
+          dependsOn={dependsOn}
         />
       );
     }
@@ -404,6 +418,7 @@ export default function ArrayViz({
       pointers={pointers}
       windowLeft={windowLeft}
       windowRight={windowRight}
+      dependsOn={dependsOn}
     />
   );
 }

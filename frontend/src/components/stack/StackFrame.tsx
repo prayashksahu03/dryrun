@@ -19,8 +19,6 @@ const INDEX_NAMES = new Set([
   'slow', 'fast', 'head', 'tail', 'curr',
 ]);
 
-// DSU parent array names → render as forest
-const DSU_NAMES = new Set(['parent', 'par', 'dsu', 'fa', 'root', 'id', 'f']);
 // BIT/Fenwick array names → render with arc overlay (not 'tree' — too generic, clashes with segtree)
 const BIT_NAMES = new Set(['bit', 'BIT', 'fenwick', 'fen', 'bit_tree', 'bitree']);
 
@@ -79,6 +77,10 @@ export default function StackFrameComponent({
 }) {
   const prevFrame = useExecutionStore(s => s.prevFrame());
   const vizHints  = useExecutionStore(s => s.vizHints);
+  // Object identities the interpreter declared as disjoint-set forests this step.
+  const dsuOids   = useExecutionStore(s => s.currentFrame()?.dsu?.oids ?? null);
+  // Declared cell dependencies (DP / prefix-sum recurrence) for this step.
+  const deps      = useExecutionStore(s => s.currentFrame()?.deps ?? null);
 
   // Pilot 1 (semantic pilot): consume the DECLARED written cell from the step's
   // cause chain instead of the bespoke lastWrite field. When the active step
@@ -260,16 +262,13 @@ export default function StackFrameComponent({
               );
             }
 
-            // DSU parent-array detection (1D, all values in [0, n))
-            if (!val.rows && !val.cols && DSU_NAMES.has(name)) {
-              const vals = val.values as number[];
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              const toIdx = (v: unknown) => { const x = typeof v === 'number' ? v : (v as any)?.value ?? 0; return typeof x === 'number' ? x : 0; };
-              const allInRange = vals.length > 0 && vals.every(v => { const x = toIdx(v); return x >= 0 && x < vals.length; });
-              // Reject all-same arrays (e.g. zero-initialized globals before init() runs)
-              const allSame = vals.length > 1 && vals.every(v => toIdx(v) === toIdx(vals[0]));
-              const isDSU = allInRange && !allSame;
-              if (isDSU) {
+            // DSU forest — rendered only when the interpreter DECLARED this
+            // object a disjoint-set forest (structural: the array forms a valid
+            // parent-forest and the run passed through the identity make_set).
+            // No variable-name guessing, so `res` and friends never mis-render.
+            {
+              const oid = (val as { oid?: string }).oid;
+              if (!val.rows && !val.cols && oid && dsuOids?.includes(oid)) {
                 return (
                   <div key={name} className="px-1.5 pb-1">
                     <DSUViz
@@ -283,7 +282,7 @@ export default function StackFrameComponent({
               }
             }
 
-            // User-confirmed DSU via ambiguity panel (name not in DSU_NAMES)
+            // User-confirmed DSU via ambiguity panel (last-resort override)
             if (!val.rows && !val.cols && vizHints[name]?.kind === 'dsu') {
               return (
                 <div key={name} className="px-1.5 pb-1">
@@ -316,6 +315,10 @@ export default function StackFrameComponent({
               ? computePointers(frame, name, arrLen) : undefined;
             const win = !val.rows && !val.cols
               ? computeWindow(frame, arrLen) : null;
+            // Recurrence dependencies: highlight the cells the active cell was
+            // computed from, when the interpreter declared them for this object.
+            const arrOid = (val as { oid?: string }).oid;
+            const dependsOn = deps && arrOid && arrOid === deps.oid ? deps.dependsOn : undefined;
 
             return (
               <div key={name} className="px-1.5 pb-1">
@@ -330,6 +333,7 @@ export default function StackFrameComponent({
                   pointers={pointers}
                   windowLeft={win?.left}
                   windowRight={win?.right}
+                  dependsOn={dependsOn}
                 />
               </div>
             );
