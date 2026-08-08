@@ -6561,9 +6561,37 @@ class CppInterpreter:
             c, seen = nxt, seen + 1
         return c
 
+    def _subscript_cell_ref(self, sub_c):
+        """Cell reference {kind:'cell', name, container_oid, index} for a 1D
+        subscript — either a C-array `arr[idx]` (ARRAY_SUBSCRIPT_EXPR) or a
+        container `vec[idx]` (CALL_EXPR 'operator[]'). Returns None for a nested
+        (2D) base — 2D cell addressing in the cause chain is a later slice."""
+        try:
+            ch = self._ch(sub_c)
+            if len(ch) < 2:
+                return None
+            base = self._deep_unwrap(ch[0])
+            if base is None:
+                return None
+            # Nested subscript (dp[i][j]) → defer 2D to a later slice.
+            if base.kind == CK.ARRAY_SUBSCRIPT_EXPR or (
+                    base.kind == CK.CALL_EXPR and base.spelling == 'operator[]'):
+                return None
+            arr_name = self._cursor_name(base)
+            if not arr_name:
+                return None
+            idx = self._to_int(self._eval(ch[-1]))
+            return {'kind': 'cell', 'name': arr_name,
+                    'container_oid': self._oid_for(arr_name), 'index': idx}
+        except Exception:
+            return None
+
     def _cause_operand(self, cursor):
         """Return (READ-op | None, value). A variable operand yields a READ node
-        carrying a stable-oid name-reference; a literal yields no node."""
+        carrying a stable-oid name-reference; an array-subscript operand yields a
+        READ node carrying a CELL reference (so a self-referential recurrence like
+        dp[i]=dp[i-1]+dp[i-2] exposes which cells it depended on); a literal yields
+        no node."""
         c = self._deep_unwrap(cursor)
         val = self._to_int(self._eval(cursor))
         if c is not None and c.kind == CK.DECL_REF_EXPR and c.spelling:
@@ -6571,6 +6599,11 @@ class CppInterpreter:
             return ({'op': 'READ',
                      'ref': {'kind': 'name', 'name': nm, 'oid': self._oid_for(nm)},
                      'value': val}, val)
+        if c is not None and (c.kind == CK.ARRAY_SUBSCRIPT_EXPR
+                or (c.kind == CK.CALL_EXPR and c.spelling == 'operator[]')):
+            cell = self._subscript_cell_ref(c)
+            if cell is not None:
+                return ({'op': 'READ', 'ref': cell, 'value': val}, val)
         return (None, val)
 
     def _rhs_cause_ops(self, init_cursor, result_val):
