@@ -347,14 +347,218 @@ def _algorithm_label(roles: dict) -> Optional[str]:
     return None
 
 
+# ── grid projection ──────────────────────────────────────────────────────────
+#
+# A grid is NOT a graph — it is a 2D-cell structure onto which a neighbour
+# relation is projected. So we render the grid natively (rows × cols of cells)
+# and overlay the traversal, rather than flattening cells into abstract nodes.
+
+_MAX_GRID_CELLS = 400  # up to 20×20
+
+# Conventional (row, col) variable pairs for the cell being processed. The
+# renderer never sees these names — only the resolved cell.
+_CURRENT_CELL_PAIRS = (('r', 'c'), ('x', 'y'), ('row', 'col'), ('i', 'j'),
+                       ('cr', 'cc'), ('ci', 'cj'))
+
+
+def _iter_2d_arrays(mem: dict):
+    for frame in mem.get('stack', []):
+        for name, val in frame.get('variables', {}).items():
+            if (isinstance(val, dict) and val.get('kind') == 'array'
+                    and val.get('rows') and val.get('cols')):
+                yield name, val
+
+
+def _grid_sig(val: dict):
+    r, c = val.get('rows'), val.get('cols')
+    vals = val.get('values')
+    if not isinstance(vals, list):
+        return None
+    try:
+        return tuple(tuple(row[:c]) for row in vals[:r])
+    except Exception:
+        return None
+
+
+def _grid_cells(val: dict):
+    r, c = val['rows'], val['cols']
+    out = []
+    for row in val['values'][:r]:
+        out.append([(_as_int(x) if _as_int(x) is not None else x) for x in row[:c]])
+    return out
+
+
+def _find_2d_by_oid(mem: dict, oid: str):
+    for _name, val in _iter_2d_arrays(mem):
+        if _oid_of(val, _name) == oid:
+            return val
+    return None
+
+
+def _cell_queue(mem: dict, rows: int, cols: int):
+    """A queue/stack/deque of cell pairs (the grid frontier), or None."""
+    for frame in mem.get('stack', []):
+        for name, vval in frame.get('variables', {}).items():
+            if not (isinstance(vval, dict) and vval.get('kind') == 'array'):
+                continue
+            ct = (vval.get('ctype') or '').lower()
+            if 'stack' in ct:
+                kind = 'stack'
+            elif 'queue' in ct or 'deque' in ct:
+                kind = 'queue'
+            else:
+                continue
+            raw = vval.get('values')
+            if not isinstance(raw, list):
+                continue
+            cells = []
+            ok = True
+            for el in raw:
+                if not (isinstance(el, dict) and el.get('kind') == 'struct'):
+                    ok = False
+                    break
+                f = el.get('fields') or {}
+                a = _as_int(f.get('first'))
+                b = _as_int(f.get('second'))
+                if a is None or b is None or not (0 <= a < rows and 0 <= b < cols):
+                    ok = False
+                    break
+                cells.append({'r': a, 'c': b})
+            if ok and cells:
+                return {'kind': kind, 'cells': cells, 'oid': _oid_of(vval, name)}
+    return None
+
+
+def _grid_roles(mem: dict, rows: int, cols: int, visited_oid: str):
+    visited_arr = _find_2d_by_oid(mem, visited_oid)
+    visited_cells = None
+    if visited_arr is not None:
+        vals = visited_arr.get('values') or []
+        visited_cells = []
+        for i in range(min(rows, len(vals))):
+            row = vals[i]
+            for j in range(min(cols, len(row))):
+                if _as_int(row[j]) == 1:
+                    visited_cells.append({'r': i, 'c': j})
+
+    current = None
+    innermost = mem['stack'][-1].get('variables', {}) if mem.get('stack') else {}
+    for rn, cn in _CURRENT_CELL_PAIRS:
+        rv, cv = innermost.get(rn), innermost.get(cn)
+        if (isinstance(rv, dict) and rv.get('kind') == 'int'
+                and isinstance(cv, dict) and cv.get('kind') == 'int'):
+            a, b = rv.get('value'), cv.get('value')
+            if isinstance(a, int) and isinstance(b, int) and 0 <= a < rows and 0 <= b < cols:
+                current = {'r': a, 'c': b}
+                break
+    if current is None:
+        # a `cur`/`p`/`cell` pair struct
+        for nm in ('cur', 'cell', 'p', 'node', 'front'):
+            sv = innermost.get(nm)
+            if isinstance(sv, dict) and sv.get('kind') == 'struct':
+                f = sv.get('fields') or {}
+                a, b = _as_int(f.get('first')), _as_int(f.get('second'))
+                if a is not None and b is not None and 0 <= a < rows and 0 <= b < cols:
+                    current = {'r': a, 'c': b}
+                    break
+
+    fr = _cell_queue(mem, rows, cols)
+    return {'visitedCells': visited_cells, 'current': current, 'frontier': fr}
+
+
+def _annotate_grid(trace: list) -> bool:
+    """If this run is a 2D-cell traversal, attach grid/execution descriptors and
+    return True. Otherwise leave the trace untouched and return False."""
+    # Classify 2D arrays across the whole run: a terrain grid is static, a
+    # visited map is dynamic (cells flip as the traversal proceeds).
+    twod: dict = {}
+    for step in trace:
+        mem = step.get('memory') if isinstance(step, dict) else None
+        if not mem:
+            continue
+        for name, val in _iter_2d_arrays(mem):
+            r, c = val.get('rows'), val.get('cols')
+            if not (isinstance(r, int) and isinstance(c, int)) or r < 1 or c < 1 or r * c > _MAX_GRID_CELLS:
+                continue
+            oid = _oid_of(val, name)
+            info = twod.setdefault(oid, {'shape': (r, c), 'sigs': set(), 'sample': None})
+            sig = _grid_sig(val)
+            if sig is not None:
+                info['sigs'].add(sig)
+                info['sample'] = _grid_cells(val)  # keep latest; terrain is stable anyway
+    if not twod:
+        return False
+
+    dynamic = {oid: i for oid, i in twod.items() if len(i['sigs']) >= 2}
+    static  = {oid: i for oid, i in twod.items() if len(i['sigs']) <= 1}
+
+    # visited = a dynamic 2D array that is always 0/1 across every observed state.
+    visited_oid = None
+    shape = None
+    for oid, info in dynamic.items():
+        if all(v in (0, 1) for sig in info['sigs'] for row in sig for v in row):
+            visited_oid, shape = oid, info['shape']
+            break
+    if visited_oid is None:
+        return False  # no 2D visited map — not a grid traversal we can narrate
+
+    rows, cols = shape
+
+    # terrain grid = a static 2D array of the same shape; else the visited map's
+    # shape defines a neutral (all-open) grid (in-place fills have no separate map).
+    grid_oid, grid_cells = None, None
+    for oid, info in static.items():
+        if info['shape'] == shape:
+            grid_oid, grid_cells = oid, info['sample']
+            break
+    if grid_cells is None:
+        grid_oid = visited_oid
+        grid_cells = [[0] * cols for _ in range(rows)]
+
+    # Per-step roles + first live step.
+    roles = []
+    first_live = None
+    for i, step in enumerate(trace):
+        mem = step.get('memory') if isinstance(step, dict) else None
+        r = _grid_roles(mem, rows, cols, visited_oid) if mem else None
+        roles.append(r)
+        # Require a genuine CELL signal — a cell-queue or a current-cell coordinate
+        # pair. A visited map alone is not enough: an adjacency matrix is also a
+        # dynamic 0/1 2D array (it flips during construction) but has no cell
+        # traversal, so it must fall through to the graph reading instead.
+        if first_live is None and r is not None and (
+            r['current'] is not None or r['frontier'] is not None
+        ):
+            first_live = i
+    if first_live is None:
+        return False
+
+    for i, step in enumerate(trace):
+        if i < first_live:
+            continue
+        r = roles[i] or {}
+        fr = r.get('frontier')
+        step['grid'] = {
+            'oid': grid_oid,
+            'rows': rows,
+            'cols': cols,
+            'cells': grid_cells,
+        }
+        step['execution'] = {
+            'activeObject': grid_oid,
+            'currentCell': r.get('current'),
+            'visitedCells': r.get('visitedCells'),
+            'frontierCells': fr['cells'] if fr else None,
+            'frontierKind': fr['kind'] if fr else None,
+            'algorithm': ('BFS' if fr and fr['kind'] == 'queue'
+                          else 'DFS' if fr and fr['kind'] == 'stack' else None),
+        }
+    return True
+
+
 # ── public entrypoint ────────────────────────────────────────────────────────
 
-def annotate_trace(trace: list) -> list:
-    """Attach graph/execution descriptors to each step, in place. Returns trace."""
-    if not isinstance(trace, list) or not trace:
-        return trace
-
-    # Per-step structure + roles.
+def _annotate_graph(trace: list) -> None:
     structures = []
     roles_per_step = []
     first_live = None
@@ -374,7 +578,7 @@ def annotate_trace(trace: list) -> list:
             first_live = i
 
     if first_live is None:
-        return trace  # no graph traversal in this run
+        return
 
     for i, step in enumerate(trace):
         st = structures[i]
@@ -399,4 +603,15 @@ def annotate_trace(trace: list) -> list:
             'algorithm': _algorithm_label(r),
         }
 
+
+def annotate_trace(trace: list) -> list:
+    """Attach semantic-view descriptors to each step, in place. Returns trace.
+
+    Grid projection takes precedence over the graph reading: a 2D-cell traversal
+    renders as a grid, never flattened into abstract nodes."""
+    if not isinstance(trace, list) or not trace:
+        return trace
+    if _annotate_grid(trace):
+        return trace
+    _annotate_graph(trace)
     return trace

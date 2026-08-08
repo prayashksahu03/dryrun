@@ -7,6 +7,7 @@ import { getVisualIdentity } from '../../utils/visualIdentity';
 import TreeView from './TreeView';
 import TrieView, { findTrieRoot } from './TrieView';
 import GraphViz from '../graph/GraphViz';
+import GridView from '../graph/GridView';
 import SegTreeViz from '../arrays/SegTreeViz';
 
 function isTreeHeap(heap: Record<string, HeapBlock>): boolean {
@@ -102,11 +103,19 @@ export default function HeapZone() {
 
   const entries = Object.entries(heap);
 
-  // ── Graph: render the interpreter-declared descriptors 1:1 ───────────────
-  // Structure (nodes/edges/directedness) and roles (current/frontier/visited)
-  // are declared per step by the backend semantic-view resolver — the frontend
-  // performs ZERO detection. The GraphDescriptor persists once a run's traversal
-  // begins, so the graph never vanishes when the frontier drains.
+  // ── Semantic views: render the interpreter-declared descriptors 1:1 ──────
+  // Structure and roles are declared per step by the backend semantic-view
+  // resolver — the frontend performs ZERO detection. A grid is a projection
+  // (rendered natively as cells), so it takes precedence over the graph reading;
+  // a step never carries both. Descriptors persist once a run's traversal
+  // begins, so the view never vanishes when the frontier drains.
+  if (frame.grid) {
+    return (
+      <div className="flex-1 overflow-y-auto p-2 flex items-start justify-center">
+        <GridView grid={frame.grid} execution={frame.execution} />
+      </div>
+    );
+  }
   if (frame.graph) {
     return (
       <div className="flex-1 overflow-y-auto">

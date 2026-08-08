@@ -95,12 +95,29 @@ export interface GraphDescriptor {
 
 export type FrontierKind = 'queue' | 'stack' | 'callstack' | 'pq';
 
+// A grid is a projection, not a graph: a 2D structure the interpreter declares
+// natively so cells keep their spatial identity instead of being flattened.
+export interface GridDescriptor {
+  oid: string;
+  rows: number;
+  cols: number;
+  cells: (number | string)[][];
+}
+
+export type Cell = { r: number; c: number };
+
 export interface ExecutionDescriptor {
   activeObject?: string;
+  // Graph roles (node ids).
   current?: number | null;
   parent?: number | null;
   visited?: number[] | null;
   frontier?: { kind: FrontierKind; members: number[]; oid?: string } | null;
+  // Grid roles (cells).
+  currentCell?: Cell | null;
+  visitedCells?: Cell[] | null;
+  frontierCells?: Cell[] | null;
+  frontierKind?: FrontierKind | null;
   // Derived, non-load-bearing label. Rendering never depends on it.
   algorithm?: string | null;
 }
@@ -113,6 +130,7 @@ export interface TraceStep {
   memory: MemorySnapshot;
   // Declared semantic views for this snapshot (present only when applicable).
   graph?: GraphDescriptor | null;
+  grid?: GridDescriptor | null;
   execution?: ExecutionDescriptor | null;
 }
 
