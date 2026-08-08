@@ -92,9 +92,58 @@ def _weighted_matrix_to_edges(mat, wmat, n, directed):
     return edges
 
 
+def _map_adjacency(val: dict):
+    """Build (n, mat) from a map<int, vector<int>> adjacency structure, or None.
+    Keys are node ids; each value is that node's neighbour list."""
+    data = val.get('data')
+    if not isinstance(data, dict) or not data:
+        return None
+    adj = {}
+    ids = set()
+    for k, v in data.items():
+        try:
+            ki = int(k)
+        except (TypeError, ValueError):
+            return None
+        if ki < 0 or not (isinstance(v, dict) and v.get('kind') == 'array'):
+            return None
+        nbrs = []
+        for x in v.get('values', []):
+            xi = _as_int(x)
+            if xi is None or xi < 0:
+                return None
+            nbrs.append(xi)
+        adj[ki] = nbrs
+        ids.add(ki)
+        ids.update(nbrs)
+    if not ids:
+        return None
+    n = max(ids) + 1
+    if n < _MIN_N or n > _MAX_N:
+        return None
+    mat = [[0] * n for _ in range(n)]
+    for u, nbrs in adj.items():
+        for w in nbrs:
+            if w < n:
+                mat[u][w] = 1
+    if all(all(v == 0 for v in row) for row in mat):
+        return None
+    return n, mat
+
+
 def _detect_structure(mem: dict):
     """Return (oid, n, mat, directed, wmat_or_None) for the first stack object
-    that looks like a graph — adjacency matrix or adjacency list — else None."""
+    that looks like a graph — adjacency matrix, adjacency list, edge list, or a
+    map<int, vector<int>> — else None."""
+    # Map-based adjacency (map / unordered_map keyed by node id).
+    for frame in mem.get('stack', []):
+        for name, val in frame.get('variables', {}).items():
+            if isinstance(val, dict) and val.get('kind') == 'map':
+                built = _map_adjacency(val)
+                if built is not None:
+                    n, mat = built
+                    return _oid_of(val, name), n, mat, not _is_symmetric(mat, n), None
+
     for name, val in _iter_frame_arrays(mem):
         if val.get('kind') != 'array':
             continue

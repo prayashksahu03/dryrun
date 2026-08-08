@@ -5316,7 +5316,60 @@ class CppInterpreter:
             outer_arr = self._read_this_field(real_name, line)
             is_this   = True
 
-        if not isinstance(outer_arr, dict) or outer_arr.get('kind') != 'array':
+        if not isinstance(outer_arr, dict):
+            return _INT(0)
+
+        # ── map value mutation: adj[key].push_back(v) on a map<K, vector<T>> ──
+        # operator[] on a map returns a reference to the (auto-created) value, so
+        # the method must mutate the value stored IN the map. Previously this path
+        # only handled kind=='array' and silently dropped map mutations — which is
+        # why adjacency lists built with `adj[u].push_back(v)` came out empty.
+        if outer_arr.get('kind') == 'map':
+            raw_key = self._eval(self._unwrap(idx_c) or idx_c)
+            mkey    = self._make_map_key(raw_key)
+            data    = outer_arr.setdefault('data', {})
+            inner   = data.get(mkey)
+            if not (isinstance(inner, dict) and inner.get('kind') == 'array'):
+                inner = {'kind': 'array', 'values': []}   # default-constructed vector
+                data[mkey] = inner
+            inner_vals = list(inner.get('values', []))
+
+            def _persist():
+                data[mkey] = inner
+                if is_this:
+                    self._write_this_field(real_name, outer_arr, line)
+                elif real_name:
+                    self.memory.set_var(real_name, outer_arr)
+                self.memory.update_line(line)
+
+            if method_name == 'push_back':
+                stored = self._arr_push(inner, args[0] if args else _INT(0))
+                _persist()
+                self._emit(line, f"{real_name}[{mkey}].push_back({self._fmt(stored)}).",
+                           {'type': 'assign', 'target': f'{real_name}[{mkey}]', 'value': self._fmt(stored)})
+                return _INT(0)
+            if method_name == 'pop_back':
+                if inner_vals:
+                    inner['values'] = inner_vals[:-1]
+                    _persist()
+                return _INT(0)
+            if method_name == 'clear':
+                inner['values'] = []
+                _persist()
+                return _INT(0)
+            if method_name == 'size':
+                return _INT(len(inner_vals))
+            if method_name == 'empty':
+                return _INT(int(len(inner_vals) == 0))
+            if method_name == 'back':
+                v = inner_vals[-1] if inner_vals else _INT(0)
+                return v if isinstance(v, dict) else _INT(int(v))
+            if method_name == 'front':
+                v = inner_vals[0] if inner_vals else _INT(0)
+                return v if isinstance(v, dict) else _INT(int(v))
+            return _INT(0)
+
+        if outer_arr.get('kind') != 'array':
             return _INT(0)
 
         vals = outer_arr.get('values', [])
@@ -6413,6 +6466,16 @@ class CppInterpreter:
     def _is_vector_type(self, type_spell: str) -> bool:
         # Exclude iterator types (std::vector<int>::iterator is NOT a vector variable)
         if '::iterator' in type_spell or '::const_iterator' in type_spell:
+            return False
+        # A container whose VALUE type contains vector<...> (e.g.
+        # map<int, vector<int>>, priority_queue<int, vector<int>>) must not be
+        # mistaken for a vector just because the string contains "vector<". Look
+        # at the OUTERMOST template only.
+        t = re.sub(r'^(const|volatile)\s+', '', type_spell.replace('std::', '').lstrip()).lstrip()
+        _NON_VEC_OUTER = ('map<', 'unordered_map<', 'multimap<', 'set<',
+                          'unordered_set<', 'multiset<', 'pair<', 'tuple<',
+                          'queue<', 'stack<', 'deque<', 'priority_queue<')
+        if any(t.startswith(p) for p in _NON_VEC_OUTER):
             return False
         return 'vector<' in type_spell or type_spell == 'vector'
 
