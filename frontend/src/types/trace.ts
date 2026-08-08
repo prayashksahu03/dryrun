@@ -134,6 +134,9 @@ export interface TraceStep {
   execution?: ExecutionDescriptor | null;
   // Object identities (oids) declared to be disjoint-set forests this step.
   dsu?: { oids: string[] } | null;
+  // Recurrence dependencies for a self-referential array write (DP / prefix sum):
+  // the active cell and the same-array cells it was computed from.
+  deps?: { oid: string; cell: number; dependsOn: number[] } | null;
 }
 
 export interface Trace {

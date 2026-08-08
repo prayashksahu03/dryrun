@@ -755,15 +755,72 @@ def _annotate_dsu(trace: list) -> None:
 
 # ── public entrypoint ────────────────────────────────────────────────────────
 
+# ── cell dependencies (DP / prefix-sum recurrences) ──────────────────────────
+#
+# Not a declared "DP type" — a projection over the causal WRITE and its feeding
+# READs. When a write to arr[i] is computed from other cells of the SAME array,
+# those cells are its dependencies. We only surface this for a *sustained fill*
+# (self-referential writes across several steps), so an incidental one-off read
+# (a swap) never draws dependency links.
+
+_DEPS_MIN_FILL_STEPS = 3
+
+
+def _annotate_deps(trace: list) -> None:
+    per_oid: dict = {}
+    records = []  # per step: (oid, cell, [dep cells]) or None
+    for step in trace:
+        ev = step.get('event') if isinstance(step, dict) else None
+        cause = ev.get('cause') if isinstance(ev, dict) else None
+        if not (isinstance(cause, list) and cause):
+            records.append(None)
+            continue
+        write = next((o for o in reversed(cause)
+                      if o.get('op') == 'WRITE' and (o.get('ref') or {}).get('kind') == 'cell'), None)
+        if not write:
+            records.append(None)
+            continue
+        woid = write['ref'].get('container_oid')
+        widx = write['ref'].get('index')
+        if woid is None or widx is None:
+            records.append(None)
+            continue
+        deps = []
+        for o in cause:
+            if o.get('op') != 'READ':
+                continue
+            ref = o.get('ref') or {}
+            if ref.get('kind') == 'cell' and ref.get('container_oid') == woid:
+                di = ref.get('index')
+                if di is not None and di != widx:
+                    deps.append(di)
+        if deps:
+            records.append((woid, widx, sorted(set(deps))))
+            per_oid[woid] = per_oid.get(woid, 0) + 1
+        else:
+            records.append(None)
+
+    keep = {oid for oid, c in per_oid.items() if c >= _DEPS_MIN_FILL_STEPS}
+    if not keep:
+        return
+    for i, rec in enumerate(records):
+        if rec is None:
+            continue
+        woid, widx, deps = rec
+        if woid in keep:
+            trace[i]['deps'] = {'oid': woid, 'cell': widx, 'dependsOn': deps}
+
+
 def annotate_trace(trace: list) -> list:
     """Attach semantic-view descriptors to each step, in place. Returns trace.
 
-    DSU is a declared stack object and runs always. Grid projection then takes
-    precedence over the graph reading: a 2D-cell traversal renders as a grid,
-    never flattened into abstract nodes."""
+    DSU and cell-dependencies are declared stack projections and run always.
+    Grid projection then takes precedence over the graph reading: a 2D-cell
+    traversal renders as a grid, never flattened into abstract nodes."""
     if not isinstance(trace, list) or not trace:
         return trace
     _annotate_dsu(trace)
+    _annotate_deps(trace)
     if _annotate_grid(trace):
         return trace
     _annotate_graph(trace)

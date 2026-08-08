@@ -79,6 +79,8 @@ export default function StackFrameComponent({
   const vizHints  = useExecutionStore(s => s.vizHints);
   // Object identities the interpreter declared as disjoint-set forests this step.
   const dsuOids   = useExecutionStore(s => s.currentFrame()?.dsu?.oids ?? null);
+  // Declared cell dependencies (DP / prefix-sum recurrence) for this step.
+  const deps      = useExecutionStore(s => s.currentFrame()?.deps ?? null);
 
   // Pilot 1 (semantic pilot): consume the DECLARED written cell from the step's
   // cause chain instead of the bespoke lastWrite field. When the active step
@@ -313,6 +315,10 @@ export default function StackFrameComponent({
               ? computePointers(frame, name, arrLen) : undefined;
             const win = !val.rows && !val.cols
               ? computeWindow(frame, arrLen) : null;
+            // Recurrence dependencies: highlight the cells the active cell was
+            // computed from, when the interpreter declared them for this object.
+            const arrOid = (val as { oid?: string }).oid;
+            const dependsOn = deps && arrOid && arrOid === deps.oid ? deps.dependsOn : undefined;
 
             return (
               <div key={name} className="px-1.5 pb-1">
@@ -327,6 +333,7 @@ export default function StackFrameComponent({
                   pointers={pointers}
                   windowLeft={win?.left}
                   windowRight={win?.right}
+                  dependsOn={dependsOn}
                 />
               </div>
             );
