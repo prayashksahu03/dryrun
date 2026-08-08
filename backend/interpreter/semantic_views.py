@@ -604,13 +604,117 @@ def _annotate_graph(trace: list) -> None:
         }
 
 
+# ── DSU (disjoint-set / union-find) as a declared object ─────────────────────
+#
+# A parent array and an ordinary result array are BOTH vector<int> — the type
+# and values alone can't tell them apart, and guessing from the variable name
+# violates the core law (it is what makes `res` false-positive as a DSU). The
+# only name-free evidence is structural: does the array currently form a valid
+# parent-forest? We declare DSU when it does AND the run ever shows a genuine
+# multi-tree forest (>= 2 roots) — which rules out a zero-initialised result
+# array (all cells point to node 0: a valid but single-root "forest").
+
+_MAX_DSU_N = 64
+
+
+def _parent_ints(val: dict, n: int):
+    vals = val.get('values')
+    if not isinstance(vals, list) or len(vals) != n:
+        return None
+    out = []
+    for x in vals:
+        xi = _as_int(x)
+        if xi is None:
+            return None
+        out.append(xi)
+    return out
+
+
+def _forest_roots(parent, n):
+    """Return the root list if `parent` is a valid forest (every value in [0,n),
+    and following x -> parent[x] from every node terminates at a self-root with
+    no cycle of length >= 2), else None."""
+    for v in parent:
+        if not (0 <= v < n):
+            return None
+    for i in range(n):
+        x = i
+        steps = 0
+        while parent[x] != x:
+            x = parent[x]
+            steps += 1
+            if steps > n:
+                return None  # a cycle of length >= 2 — not a forest
+    return [j for j in range(n) if parent[j] == j]
+
+
+def _iter_1d_int_arrays(mem: dict):
+    for frame in mem.get('stack', []):
+        for name, val in frame.get('variables', {}).items():
+            if (isinstance(val, dict) and val.get('kind') == 'array'
+                    and not val.get('rows') and not val.get('cols')):
+                yield name, val
+
+
+def _annotate_dsu(trace: list) -> None:
+    """Declare which 1D int arrays are disjoint-set forests, per step. Orthogonal
+    to graph/grid (DSU is a stack object), so it always runs."""
+    info: dict = {}  # oid -> {all_forest, max_roots, seen}
+    for step in trace:
+        mem = step.get('memory') if isinstance(step, dict) else None
+        if not mem:
+            continue
+        for name, val in _iter_1d_int_arrays(mem):
+            n = len(val.get('values') or [])
+            if n < 2 or n > _MAX_DSU_N:
+                continue
+            parent = _parent_ints(val, n)
+            if parent is None:
+                continue
+            oid = _oid_of(val, name)
+            rec = info.setdefault(oid, {'all_forest': True, 'saw_identity': False, 'n': n})
+            roots = _forest_roots(parent, n)
+            if roots is None:
+                rec['all_forest'] = False
+            elif len(roots) == n:
+                # Every node is its own root: the identity forest (make_set). A
+                # result array essentially never equals the full identity
+                # permutation, so this is the distinguishing DSU signal.
+                rec['saw_identity'] = True
+
+    dsu_oids = {oid for oid, r in info.items()
+                if r['all_forest'] and r['saw_identity']}
+    if not dsu_oids:
+        return
+
+    for step in trace:
+        mem = step.get('memory') if isinstance(step, dict) else None
+        if not mem:
+            continue
+        present = []
+        for name, val in _iter_1d_int_arrays(mem):
+            oid = _oid_of(val, name)
+            if oid not in dsu_oids:
+                continue
+            n = len(val.get('values') or [])
+            parent = _parent_ints(val, n)
+            if parent is not None and _forest_roots(parent, n) is not None:
+                present.append(oid)
+        if present:
+            step['dsu'] = {'oids': present}
+
+
+# ── public entrypoint ────────────────────────────────────────────────────────
+
 def annotate_trace(trace: list) -> list:
     """Attach semantic-view descriptors to each step, in place. Returns trace.
 
-    Grid projection takes precedence over the graph reading: a 2D-cell traversal
-    renders as a grid, never flattened into abstract nodes."""
+    DSU is a declared stack object and runs always. Grid projection then takes
+    precedence over the graph reading: a 2D-cell traversal renders as a grid,
+    never flattened into abstract nodes."""
     if not isinstance(trace, list) or not trace:
         return trace
+    _annotate_dsu(trace)
     if _annotate_grid(trace):
         return trace
     _annotate_graph(trace)

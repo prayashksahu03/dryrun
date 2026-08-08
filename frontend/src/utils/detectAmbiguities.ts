@@ -131,27 +131,9 @@ export function detectAmbiguities(trace: Trace): Ambiguity[] {
       }
     }
 
-    // ── 5. 1D int array with all values in [0, n) and not all-same → possible DSU ──
-    // Fires only when the name is NOT already auto-detected as DSU.
-    if (val.kind === 'array' && !val.rows && !val.cols) {
-      const values = val.values as unknown[];
-      if (!Array.isArray(values) || values.length < 2) continue;
-      if (typeof values[0] !== 'number') continue;
-
-      const nameLower = name.toLowerCase();
-      const AUTO_DSU  = new Set(['parent', 'par', 'dsu', 'fa', 'root', 'id', 'f']);
-      const AUTO_BIT  = new Set(['bit', 'fenwick', 'fen', 'bit_tree', 'bitree']);
-      const SEGTREE_EXCL = ['segtree', 'seg_tree', 'segment_tree', 'seg', 'st', 'tree'];
-      if (AUTO_DSU.has(nameLower) || AUTO_BIT.has(nameLower)) continue;
-      if (SEGTREE_EXCL.some(k => nameLower.includes(k))) continue;
-
-      const n = values.length;
-      const allInRange = (values as number[]).every(v => typeof v === 'number' && v >= 0 && v < n);
-      const allSame    = (values as number[]).every(v => v === (values as number[])[0]);
-      if (allInRange && !allSame) {
-        result.push({ id: `${name}:array_or_dsu`, kind: 'array_or_dsu', varName: name });
-      }
-    }
+    // (DSU is no longer guessed here. The interpreter declares disjoint-set
+    // forests structurally via step.dsu — see semantic_views.py — so a plain
+    // int array like `res` never triggers a DSU prompt anymore.)
   }
 
   return result;

@@ -132,6 +132,8 @@ export interface TraceStep {
   graph?: GraphDescriptor | null;
   grid?: GridDescriptor | null;
   execution?: ExecutionDescriptor | null;
+  // Object identities (oids) declared to be disjoint-set forests this step.
+  dsu?: { oids: string[] } | null;
 }
 
 export interface Trace {
