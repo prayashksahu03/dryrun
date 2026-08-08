@@ -121,20 +121,25 @@ def _detect_structure(mem: dict):
             directed = not _is_symmetric(mat, n)
             return _oid_of(val, name), n, mat, directed, None
 
-        # ── Adjacency list: 1D array of neighbour lists ───────────────────
+        # ── 1D array: adjacency list OR edge list ─────────────────────────
         if not rows and not cols:
             outer = val.get('values')
             if not isinstance(outer, list):
                 continue
             n = len(outer)
-            if n < _MIN_N or n > _MAX_N:
-                continue
-            built = _build_from_adjacency_list(outer, n)
-            if built is None:
-                continue
-            mat, wmat, weighted = built
-            directed = not _is_symmetric(mat, n)
-            return _oid_of(val, name), n, mat, directed, (wmat if weighted else None)
+            if _MIN_N <= n <= _MAX_N:
+                built = _build_from_adjacency_list(outer, n)
+                if built is not None:
+                    mat, wmat, weighted = built
+                    directed = not _is_symmetric(mat, n)
+                    return _oid_of(val, name), n, mat, directed, (wmat if weighted else None)
+            # Edge list: a flat vector of {first, second} int pairs. Node count
+            # is inferred from the ids, so it is independent of len(outer).
+            el = _build_from_edge_list(outer)
+            if el is not None:
+                en, emat = el
+                return _oid_of(val, name), en, emat, False, None
+            continue
 
     return None
 
@@ -217,6 +222,40 @@ def _build_from_adjacency_list(outer, n):
         return None  # empty graph — nothing useful to show
 
     return mat, wmat, weighted
+
+
+def _build_from_edge_list(outer):
+    """Build (n, mat) from a flat list of {first, second} int-pair structs — an
+    undirected edge list. Node count is inferred as max node id + 1. Returns None
+    unless every element is a clean non-negative int pair and n is in range.
+
+    Only struct pairs are treated as edges (not inner arrays), so this never
+    shadows adjacency-list detection, which owns the array-of-arrays shape."""
+    if not (isinstance(outer, list) and len(outer) >= 1):
+        return None
+    pairs = []
+    ids = set()
+    for el in outer:
+        if not (isinstance(el, dict) and el.get('kind') == 'struct'):
+            return None
+        fields = el.get('fields') or {}
+        a = _as_int(fields.get('first'))
+        b = _as_int(fields.get('second'))
+        if a is None or b is None or a < 0 or b < 0:
+            return None
+        pairs.append((a, b))
+        ids.add(a)
+        ids.add(b)
+    if not ids:
+        return None
+    n = max(ids) + 1
+    if n < _MIN_N or n > _MAX_N:
+        return None
+    mat = [[0] * n for _ in range(n)]
+    for a, b in pairs:
+        mat[a][b] = 1
+        mat[b][a] = 1
+    return n, mat
 
 
 # ── role detection ───────────────────────────────────────────────────────────
@@ -329,7 +368,9 @@ def annotate_trace(trace: list) -> list:
         else:
             r = None
         roles_per_step.append(r)
-        if first_live is None and r is not None and (r['visited'] is not None or r['current'] is not None):
+        if first_live is None and r is not None and (
+            r['visited'] is not None or r['current'] is not None or r.get('frontier') is not None
+        ):
             first_live = i
 
     if first_live is None:
