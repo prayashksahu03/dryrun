@@ -356,39 +356,93 @@ def _detect_roles(mem: dict, n: int) -> dict:
                     parent = v
                     break
 
-    # frontier: the queue / stack / deque container of node ids (the wavefront).
+    # frontier: the queue / stack / priority_queue container of node ids (the
+    # wavefront). The container's discipline distinguishes the algorithm — a
+    # priority_queue frontier is what makes Dijkstra/Prim look different from BFS
+    # — so it is a first-class role, never inferred from a variable name.
     frontier = None
     for frame in stack:
         for name, vval in frame.get('variables', {}).items():
             if not (isinstance(vval, dict) and vval.get('kind') == 'array'):
                 continue
             ct = (vval.get('ctype') or '').lower()
-            if 'queue' in ct:
-                kind = 'queue'
+            if 'priority_queue' in ct:
+                kind = 'pq'          # check before 'queue' (substring of it)
             elif 'stack' in ct:
                 kind = 'stack'
-            elif 'deque' in ct:
+            elif 'queue' in ct or 'deque' in ct:
                 kind = 'queue'
             else:
                 continue
-            raw = vval.get('values')
-            if not isinstance(raw, list):
-                continue
-            ints = [_as_int(x) for x in raw]
-            if ints and all(x is not None and 0 <= x < n for x in ints):
-                frontier = {'kind': kind, 'members': ints, 'oid': _oid_of(vval, name)}
+            members = _frontier_members(vval.get('values'), n)
+            if members is not None:
+                frontier = {'kind': kind, 'members': members, 'oid': _oid_of(vval, name)}
                 break
         if frontier is not None:
             break
 
+    # distance: the per-node distance array of a weighted traversal. Only looked
+    # for when the frontier is a priority_queue (Dijkstra/Prim), and identified
+    # structurally — a length-n int array holding at least one value >= n, i.e.
+    # values OUTSIDE the node-index range. That separates a distance array from a
+    # parent array (node indices) or a visited array (0/1), name-free.
+    distance = None
+    if frontier is not None and frontier['kind'] == 'pq':
+        for frame in stack:
+            for name, vval in frame.get('variables', {}).items():
+                if not (isinstance(vval, dict) and vval.get('kind') == 'array') or vval.get('rows'):
+                    continue
+                arr = vval.get('values')
+                if not (isinstance(arr, list) and len(arr) == n):
+                    continue
+                ints = [_as_int(x) for x in arr]
+                if any(x is None for x in ints):
+                    continue
+                if any(x >= n for x in ints):
+                    distance = {'oid': _oid_of(vval, name), 'values': ints}
+                    break
+            if distance is not None:
+                break
+
     return {'visited': visited_nodes, 'visited_oid': visited_oid,
-            'current': current, 'parent': parent, 'frontier': frontier}
+            'current': current, 'parent': parent, 'frontier': frontier,
+            'distance': distance}
+
+
+def _frontier_members(raw, n):
+    """Node ids held in a frontier container. Elements may be plain ints (BFS/DFS)
+    or {dist,node} pairs (a priority_queue). For pairs, the node is the field that
+    is a valid index for every element — preferring `second`, since a Dijkstra pq
+    is conventionally {distance, node}."""
+    if not isinstance(raw, list):
+        return None
+    ints = [_as_int(x) for x in raw]
+    if ints and all(x is not None and 0 <= x < n for x in ints):
+        return ints
+    if raw and all(isinstance(x, dict) and x.get('kind') == 'struct' for x in raw):
+        firsts, seconds, ok_f, ok_s = [], [], True, True
+        for x in raw:
+            f = x.get('fields') or {}
+            fv, sv = _as_int(f.get('first')), _as_int(f.get('second'))
+            if fv is None or not (0 <= fv < n):
+                ok_f = False
+            if sv is None or not (0 <= sv < n):
+                ok_s = False
+            firsts.append(fv)
+            seconds.append(sv)
+        if ok_s:
+            return seconds
+        if ok_f:
+            return firsts
+    return None
 
 
 def _algorithm_label(roles: dict) -> Optional[str]:
     """Derived, non-load-bearing hint. Never gates rendering."""
     fr = roles.get('frontier')
     has_visited = roles.get('visited') is not None
+    if fr and fr['kind'] == 'pq':
+        return 'Dijkstra'
     if fr and fr['kind'] == 'queue' and has_visited:
         return 'BFS'
     if fr and fr['kind'] == 'stack' and has_visited:
@@ -649,6 +703,7 @@ def _annotate_graph(trace: list) -> None:
             'parent': r.get('parent'),
             'visited': r.get('visited'),
             'frontier': r.get('frontier'),
+            'distance': r.get('distance'),
             'algorithm': _algorithm_label(r),
         }
 

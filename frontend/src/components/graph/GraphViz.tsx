@@ -56,6 +56,8 @@ export default function GraphViz({
   const visitedSet  = new Set(execution?.visited ?? []);
   const frontierSet = new Set(execution?.frontier?.members ?? []);
   const algorithm   = execution?.algorithm ?? null;
+  const distVals    = execution?.distance?.values ?? null;
+  const fmtDist = (v: number) => (v >= 1e8 ? '∞' : String(v));
   const hasWeights  = edges.some(e => e.w !== undefined);
 
   const W = 340;
@@ -207,6 +209,22 @@ export default function GraphViz({
               >
                 {id}
               </text>
+
+              {/* Per-node distance (Dijkstra/weighted) — the value updates while
+                  the node's identity/position stays fixed. */}
+              {distVals && i < distVals.length && (
+                <text
+                  x={p.x}
+                  y={p.y + NODE_R + 9}
+                  textAnchor="middle"
+                  dominantBaseline="middle"
+                  fontSize={9}
+                  fill={isCurrent ? '#fbbf24' : isFrontier ? '#7dd3fc' : '#818cf8'}
+                  style={{ pointerEvents: 'none', userSelect: 'none' }}
+                >
+                  {fmtDist(distVals[id])}
+                </text>
+              )}
             </g>
           );
         })}

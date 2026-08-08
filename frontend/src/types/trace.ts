@@ -113,6 +113,8 @@ export interface ExecutionDescriptor {
   parent?: number | null;
   visited?: number[] | null;
   frontier?: { kind: FrontierKind; members: number[]; oid?: string } | null;
+  // Per-node distances (weighted traversal, e.g. Dijkstra), indexed by node id.
+  distance?: { oid: string; values: number[] } | null;
   // Grid roles (cells).
   currentCell?: Cell | null;
   visitedCells?: Cell[] | null;
