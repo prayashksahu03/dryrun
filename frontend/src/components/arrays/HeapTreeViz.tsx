@@ -4,16 +4,21 @@ const NODE_R = 14;
 const H_GAP  = 48;
 const V_GAP  = 44;
 
-type AnyVal = number | { kind?: string; value?: unknown };
+type AnyVal = number | { kind?: string; value?: unknown; fields?: Record<string, AnyVal> };
 
 function fmtVal(v: AnyVal): string {
   if (v === null || v === undefined) return '?';
   if (typeof v === 'number') return String(v);
   if (typeof v !== 'object') return String(v);
-  const o = v as { kind?: string; value?: unknown };
+  const o = v as { kind?: string; value?: unknown; fields?: Record<string, AnyVal> };
   if (o.kind === 'int') return String(o.value ?? 0);
   if (o.kind === 'char') return String(o.value ?? '');
-  return String(v);
+  // pair / tuple (e.g. a priority_queue<pair<int,int>> element): render the
+  // fields as (a, b) rather than letting it stringify to "[object Object]".
+  if (o.kind === 'struct' && o.fields) {
+    return '(' + Object.values(o.fields).map(fmtVal).join(',') + ')';
+  }
+  return '?';
 }
 
 function toInt(v: AnyVal): number {
