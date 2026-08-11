@@ -318,7 +318,11 @@ export default function StackFrameComponent({
             // Recurrence dependencies: highlight the cells the active cell was
             // computed from, when the interpreter declared them for this object.
             const arrOid = (val as { oid?: string }).oid;
-            const dependsOn = deps && arrOid && arrOid === deps.oid ? deps.dependsOn : undefined;
+            const forThis = deps && arrOid && arrOid === deps.oid ? deps : null;
+            const dependsOn = forThis ? forThis.dependsOn : undefined;
+            const depsMeta = forThis
+              ? { kind: forThis.kind, pivot: forThis.pivot, allPairs: forThis.allPairs }
+              : undefined;
 
             return (
               <div key={name} className="px-1.5 pb-1">
@@ -334,6 +338,7 @@ export default function StackFrameComponent({
                   windowLeft={win?.left}
                   windowRight={win?.right}
                   dependsOn={dependsOn}
+                  depsMeta={depsMeta}
                 />
               </div>
             );

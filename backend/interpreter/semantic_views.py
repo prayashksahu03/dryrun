@@ -889,6 +889,32 @@ def _cell_out(key):
     return key[1] if key[0] == 'i' else {'r': key[1], 'c': key[2]}
 
 
+def _classify_2d_deps(wkey, dep_keys):
+    """Classify a 2D self-referential write's access pattern, name-free:
+
+      NEIGHBOR  — reads offset cells (i±1, j±1): grid / knapsack DP.
+      PIVOT     — reads (r,k) and (k,c) sharing a third index k that is FAR from
+                  the write (|k-r|>1 or |k-c|>1): a through-pivot relaxation, i.e.
+                  all-pairs shortest path / transitive closure (Floyd-Warshall).
+
+    The far-k guard is what separates a genuine pivot from the neighbour case,
+    where the shared index is always k = r-1 = c-1 (distance 1 from both)."""
+    if wkey[0] != 'rc':
+        return 'neighbor', None
+    r, c = wkey[1], wkey[2]
+    cells = {(k[1], k[2]) for k in dep_keys if k[0] == 'rc'}
+    for (a, b) in cells:
+        if a == r and b not in (r, c):            # (r, k) shares the write's row
+            k = b
+            if (k, c) in cells and (abs(k - r) > 1 or abs(k - c) > 1):
+                return 'pivot', k
+        if b == c and a not in (r, c):            # (k, c) shares the write's col
+            k = a
+            if (r, k) in cells and (abs(k - r) > 1 or abs(k - c) > 1):
+                return 'pivot', k
+    return 'neighbor', None
+
+
 def _annotate_deps(trace: list) -> None:
     per_oid: dict = {}
     records = []  # per step: (oid, cell_key, [dep cell_keys]) or None
@@ -926,13 +952,33 @@ def _annotate_deps(trace: list) -> None:
     keep = {oid for oid, c in per_oid.items() if c >= _DEPS_MIN_FILL_STEPS}
     if not keep:
         return
+
+    # An oid whose fill EVER uses a through-pivot relaxation is an all-pairs /
+    # transitive-closure matrix (Floyd-Warshall class) — a graph algorithm that
+    # would otherwise be mistaken for plain neighbour DP.
+    pivot_oids = set()
+    for rec in records:
+        if rec is None:
+            continue
+        woid, wkey, deps = rec
+        if woid in keep and _classify_2d_deps(wkey, deps)[0] == 'pivot':
+            pivot_oids.add(woid)
+
     for i, rec in enumerate(records):
         if rec is None:
             continue
         woid, wkey, deps = rec
-        if woid in keep:
-            trace[i]['deps'] = {'oid': woid, 'cell': _cell_out(wkey),
-                                'dependsOn': [_cell_out(k) for k in deps]}
+        if woid not in keep:
+            continue
+        kind, k = _classify_2d_deps(wkey, deps)
+        out = {'oid': woid, 'cell': _cell_out(wkey),
+               'dependsOn': [_cell_out(dk) for dk in deps], 'kind': kind}
+        if k is not None:
+            out['pivot'] = k
+        # The whole object is a pivot-relaxation matrix if any write relaxes via a
+        # pivot — surface that so the view can name it (all-pairs shortest paths).
+        out['allPairs'] = woid in pivot_oids
+        trace[i]['deps'] = out
 
 
 def annotate_trace(trace: list) -> list:

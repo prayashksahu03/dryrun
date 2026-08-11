@@ -143,6 +143,12 @@ export interface TraceStep {
     oid: string;
     cell: number | { r: number; c: number };
     dependsOn: Array<number | { r: number; c: number }>;
+    // Access-pattern classification (2D): 'neighbor' (grid/knapsack DP) vs
+    // 'pivot' (through-k relaxation → all-pairs shortest path / transitive
+    // closure). `allPairs` marks the whole object as a pivot-relaxation matrix.
+    kind?: 'neighbor' | 'pivot';
+    pivot?: number;
+    allPairs?: boolean;
   } | null;
 }
 

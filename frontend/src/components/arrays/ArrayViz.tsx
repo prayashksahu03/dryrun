@@ -197,6 +197,7 @@ function Array2D({
   cols,
   lastWrite,
   dependsOn,
+  depsMeta,
 }: {
   name: string;
   values: number[][];
@@ -204,6 +205,7 @@ function Array2D({
   cols: number;
   lastWrite?: number[];
   dependsOn?: Array<number | { r: number; c: number }>;
+  depsMeta?: { kind?: 'neighbor' | 'pivot'; pivot?: number; allPairs?: boolean };
 }) {
   const hiRow = lastWrite?.length === 2 ? lastWrite[0] : -1;
   const hiCol = lastWrite?.length === 2 ? lastWrite[1] : -1;
@@ -213,6 +215,8 @@ function Array2D({
       .filter((d): d is { r: number; c: number } => typeof d === 'object')
       .map(d => d.r * cols + d.c),
   );
+  const isPivotStep = depsMeta?.kind === 'pivot';
+  const allPairs = depsMeta?.allPairs ?? false;
 
   const MAX_COLS = 16;
   const MAX_ROWS = 12;
@@ -221,9 +225,13 @@ function Array2D({
 
   return (
     <div className="mt-2 mb-1">
-      <div className="text-[9px] font-mono text-zinc-600 mb-1.5">
-        {name}
-        <span className="text-zinc-700 ml-1">[{rows}][{cols}]</span>
+      <div className="text-[9px] font-mono text-zinc-600 mb-1.5 flex items-center gap-1.5">
+        <span>{name}<span className="text-zinc-700 ml-1">[{rows}][{cols}]</span></span>
+        {allPairs && (
+          <span className="text-[8px] font-mono px-1.5 py-0.5 rounded border border-violet-500/40 bg-violet-500/10 text-violet-300">
+            all-pairs · via pivot{isPivotStep && depsMeta?.pivot != null ? ` k=${depsMeta.pivot}` : ''}
+          </span>
+        )}
       </div>
 
       <div className="overflow-x-auto">
@@ -260,10 +268,10 @@ function Array2D({
                       <motion.div
                         animate={{
                           background: isHi ? 'rgba(251,191,36,0.18)'
-                                    : isDep ? 'rgba(129,140,248,0.16)'
+                                    : isDep ? (isPivotStep ? 'rgba(167,139,250,0.22)' : 'rgba(129,140,248,0.16)')
                                     : 'rgba(24,24,27,0.9)',
                           borderColor: isHi ? 'rgba(251,191,36,0.6)'
-                                     : isDep ? 'rgba(129,140,248,0.7)'
+                                     : isDep ? (isPivotStep ? 'rgba(167,139,250,0.8)' : 'rgba(129,140,248,0.7)')
                                      : 'rgba(63,63,70,0.5)',
                         }}
                         transition={{ duration: 0.25 }}
@@ -271,7 +279,7 @@ function Array2D({
                         style={{
                           width: CELL_W - 1,
                           height: CELL_H,
-                          color: isHi ? '#fbbf24' : isDep ? '#a5b4fc' : v !== 0 ? '#d4d4d8' : '#52525b',
+                          color: isHi ? '#fbbf24' : isDep ? (isPivotStep ? '#c4b5fd' : '#a5b4fc') : v !== 0 ? '#d4d4d8' : '#52525b',
                           margin: '0 auto',
                         }}
                       >
@@ -372,6 +380,7 @@ export default function ArrayViz({
   windowLeft,
   windowRight,
   dependsOn,
+  depsMeta,
 }: {
   name: string;
   values: number[] | number[][] | unknown[];
@@ -382,6 +391,7 @@ export default function ArrayViz({
   windowLeft?: number;
   windowRight?: number;
   dependsOn?: Array<number | { r: number; c: number }>;
+  depsMeta?: { kind?: 'neighbor' | 'pivot'; pivot?: number; allPairs?: boolean };
 }) {
   // Non-primitive elements — route by element kind
   if (!rows && !cols && values.length > 0 && typeof values[0] === 'object' && values[0] !== null && !Array.isArray(values[0])) {
@@ -421,6 +431,7 @@ export default function ArrayViz({
         cols={cols}
         lastWrite={lastWrite}
         dependsOn={dependsOn}
+        depsMeta={depsMeta}
       />
     );
   }
