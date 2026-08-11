@@ -875,9 +875,23 @@ def _annotate_dsu(trace: list) -> None:
 _DEPS_MIN_FILL_STEPS = 3
 
 
+def _cell_key(ref: dict):
+    """Hashable identity of a cell ref — 1D ('i', index) or 2D ('rc', row, col)."""
+    if ref.get('index') is not None:
+        return ('i', ref['index'])
+    if ref.get('row') is not None and ref.get('col') is not None:
+        return ('rc', ref['row'], ref['col'])
+    return None
+
+
+def _cell_out(key):
+    """Serialized cell for the descriptor — a bare index (1D) or {r,c} (2D)."""
+    return key[1] if key[0] == 'i' else {'r': key[1], 'c': key[2]}
+
+
 def _annotate_deps(trace: list) -> None:
     per_oid: dict = {}
-    records = []  # per step: (oid, cell, [dep cells]) or None
+    records = []  # per step: (oid, cell_key, [dep cell_keys]) or None
     for step in trace:
         ev = step.get('event') if isinstance(step, dict) else None
         cause = ev.get('cause') if isinstance(ev, dict) else None
@@ -890,8 +904,8 @@ def _annotate_deps(trace: list) -> None:
             records.append(None)
             continue
         woid = write['ref'].get('container_oid')
-        widx = write['ref'].get('index')
-        if woid is None or widx is None:
+        wkey = _cell_key(write['ref'])
+        if woid is None or wkey is None:
             records.append(None)
             continue
         deps = []
@@ -900,11 +914,11 @@ def _annotate_deps(trace: list) -> None:
                 continue
             ref = o.get('ref') or {}
             if ref.get('kind') == 'cell' and ref.get('container_oid') == woid:
-                di = ref.get('index')
-                if di is not None and di != widx:
-                    deps.append(di)
+                dk = _cell_key(ref)
+                if dk is not None and dk != wkey:
+                    deps.append(dk)
         if deps:
-            records.append((woid, widx, sorted(set(deps))))
+            records.append((woid, wkey, sorted(set(deps))))
             per_oid[woid] = per_oid.get(woid, 0) + 1
         else:
             records.append(None)
@@ -915,9 +929,10 @@ def _annotate_deps(trace: list) -> None:
     for i, rec in enumerate(records):
         if rec is None:
             continue
-        woid, widx, deps = rec
+        woid, wkey, deps = rec
         if woid in keep:
-            trace[i]['deps'] = {'oid': woid, 'cell': widx, 'dependsOn': deps}
+            trace[i]['deps'] = {'oid': woid, 'cell': _cell_out(wkey),
+                                'dependsOn': [_cell_out(k) for k in deps]}
 
 
 def annotate_trace(trace: list) -> list:

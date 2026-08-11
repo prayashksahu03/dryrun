@@ -137,8 +137,13 @@ export interface TraceStep {
   // Object identities (oids) declared to be disjoint-set forests this step.
   dsu?: { oids: string[] } | null;
   // Recurrence dependencies for a self-referential array write (DP / prefix sum):
-  // the active cell and the same-array cells it was computed from.
-  deps?: { oid: string; cell: number; dependsOn: number[] } | null;
+  // the active cell and the same-array cells it was computed from. Cells are a
+  // bare index (1D) or {r,c} (2D).
+  deps?: {
+    oid: string;
+    cell: number | { r: number; c: number };
+    dependsOn: Array<number | { r: number; c: number }>;
+  } | null;
 }
 
 export interface Trace {

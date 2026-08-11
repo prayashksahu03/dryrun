@@ -3190,8 +3190,12 @@ class CppInterpreter:
                     v = self._arr_set(arr_val, [row, idx], rval, line)
                     self._put_array(arr_name, base_c, arr_val, line)
                     lbl = arr_name or 'this->arr'
-                    self._emit(line, f"{lbl}[{row}][{idx}] = {v}.",
-                               {'type': 'assign', 'target': f'{lbl}[{row}][{idx}]', 'value': str(v)})
+                    _event = {'type': 'assign', 'target': f'{lbl}[{row}][{idx}]', 'value': str(v)}
+                    _cause = self._build_index2d_cause(arr_name, row, idx, och[-1], idx_c,
+                                                       rhs_cursor, rval)
+                    if _cause:
+                        _event['cause'] = _cause
+                    self._emit(line, f"{lbl}[{row}][{idx}] = {v}.", _event)
             return
 
         # 1-D
@@ -6561,11 +6565,14 @@ class CppInterpreter:
             c, seen = nxt, seen + 1
         return c
 
+    def _is_subscript(self, c):
+        return c is not None and (c.kind == CK.ARRAY_SUBSCRIPT_EXPR
+                                  or (c.kind == CK.CALL_EXPR and c.spelling == 'operator[]'))
+
     def _subscript_cell_ref(self, sub_c):
-        """Cell reference {kind:'cell', name, container_oid, index} for a 1D
-        subscript — either a C-array `arr[idx]` (ARRAY_SUBSCRIPT_EXPR) or a
-        container `vec[idx]` (CALL_EXPR 'operator[]'). Returns None for a nested
-        (2D) base — 2D cell addressing in the cause chain is a later slice."""
+        """Cell reference for a subscript read/write. 1D `arr[i]` →
+        {kind:'cell', name, container_oid, index}. 2D `dp[i][j]` →
+        {kind:'cell', name, container_oid, row, col}. Deeper nesting is deferred."""
         try:
             ch = self._ch(sub_c)
             if len(ch) < 2:
@@ -6573,10 +6580,21 @@ class CppInterpreter:
             base = self._deep_unwrap(ch[0])
             if base is None:
                 return None
-            # Nested subscript (dp[i][j]) → defer 2D to a later slice.
-            if base.kind == CK.ARRAY_SUBSCRIPT_EXPR or (
-                    base.kind == CK.CALL_EXPR and base.spelling == 'operator[]'):
-                return None
+            # 2D: base is itself a subscript (dp[i] of dp[i][j]).
+            if self._is_subscript(base):
+                bch = self._ch(base)
+                if len(bch) < 2:
+                    return None
+                arr_c = self._deep_unwrap(bch[0])
+                if arr_c is None or self._is_subscript(arr_c):
+                    return None  # 3D+ deferred
+                arr_name = self._cursor_name(arr_c)
+                if not arr_name:
+                    return None
+                row = self._to_int(self._eval(bch[-1]))
+                col = self._to_int(self._eval(ch[-1]))
+                return {'kind': 'cell', 'name': arr_name,
+                        'container_oid': self._oid_for(arr_name), 'row': row, 'col': col}
             arr_name = self._cursor_name(base)
             if not arr_name:
                 return None
@@ -6691,6 +6709,37 @@ class CppInterpreter:
                         'ref': {'kind': 'name', 'name': arr_name, 'oid': arr_oid},
                         'index': idx, 'cell': cell_ref})
             # RHS value ops (READ v, or a COMPUTE), reusing the shared builder
+            if rhs_cursor is not None:
+                rhs_ops = self._rhs_cause_ops(rhs_cursor, result_val)
+                if rhs_ops:
+                    ops.extend(rhs_ops)
+            ops.append({'op': 'WRITE', 'ref': dict(cell_ref),
+                        'value': self._to_int(result_val)})
+            return ops
+        except Exception:
+            return None
+
+    def _build_index2d_cause(self, arr_name, row, col, row_cursor, col_cursor,
+                             rhs_cursor, result_val):
+        """Causal chain for `arr[row][col] = <rhs>` — the WRITE targets a 2D cell
+        reference {container_oid, row, col}, and RHS reads of other cells of the
+        same array (e.g. dp[i-1][j], dp[i][j-1]) surface as READ cell ops. This is
+        what drives the 2D DP dependency view."""
+        try:
+            ops = []
+            arr_oid = self._oid_for(arr_name) if arr_name else None
+            for idxval, idxc in ((row, row_cursor), (col, col_cursor)):
+                idc = self._deep_unwrap(idxc)
+                if idc is not None and idc.kind == CK.DECL_REF_EXPR and idc.spelling:
+                    ops.append({'op': 'READ',
+                                'ref': {'kind': 'name', 'name': idc.spelling,
+                                        'oid': self._oid_for(idc.spelling)},
+                                'value': idxval})
+            cell_ref = {'kind': 'cell', 'name': arr_name,
+                        'container_oid': arr_oid, 'row': row, 'col': col}
+            ops.append({'op': 'INDEX',
+                        'ref': {'kind': 'name', 'name': arr_name, 'oid': arr_oid},
+                        'index': None, 'cell': cell_ref})
             if rhs_cursor is not None:
                 rhs_ops = self._rhs_cause_ops(rhs_cursor, result_val)
                 if rhs_ops:

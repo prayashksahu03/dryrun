@@ -57,9 +57,9 @@ function Array1D({
   pointers?: ArrayPointer[];
   windowLeft?: number;
   windowRight?: number;
-  dependsOn?: number[];
+  dependsOn?: Array<number | { r: number; c: number }>;
 }) {
-  const depSet = new Set(dependsOn ?? []);
+  const depSet = new Set((dependsOn ?? []).filter((d): d is number => typeof d === 'number'));
   // lastWrite.length === 1 → single highlight; length === 2 → swap dual-highlight
   const hi   = lastWrite?.length === 1 ? lastWrite[0] : -1;
   const swap0 = lastWrite?.length === 2 ? lastWrite[0] : -1;
@@ -196,15 +196,23 @@ function Array2D({
   rows,
   cols,
   lastWrite,
+  dependsOn,
 }: {
   name: string;
   values: number[][];
   rows: number;
   cols: number;
   lastWrite?: number[];
+  dependsOn?: Array<number | { r: number; c: number }>;
 }) {
   const hiRow = lastWrite?.length === 2 ? lastWrite[0] : -1;
   const hiCol = lastWrite?.length === 2 ? lastWrite[1] : -1;
+  // Cells the active cell was computed from (2D recurrence dependencies).
+  const depSet = new Set(
+    (dependsOn ?? [])
+      .filter((d): d is { r: number; c: number } => typeof d === 'object')
+      .map(d => d.r * cols + d.c),
+  );
 
   const MAX_COLS = 16;
   const MAX_ROWS = 12;
@@ -245,20 +253,25 @@ function Array2D({
                 </td>
                 {Array.from({ length: shownCols }, (_, j) => {
                   const isHi = i === hiRow && j === hiCol;
+                  const isDep = !isHi && depSet.has(i * cols + j);
                   const v = values[i]?.[j] ?? 0;
                   return (
                     <td key={j} style={{ padding: 0, width: CELL_W }}>
                       <motion.div
                         animate={{
-                          background: isHi ? 'rgba(251,191,36,0.18)' : 'rgba(24,24,27,0.9)',
-                          borderColor: isHi ? 'rgba(251,191,36,0.6)' : 'rgba(63,63,70,0.5)',
+                          background: isHi ? 'rgba(251,191,36,0.18)'
+                                    : isDep ? 'rgba(129,140,248,0.16)'
+                                    : 'rgba(24,24,27,0.9)',
+                          borderColor: isHi ? 'rgba(251,191,36,0.6)'
+                                     : isDep ? 'rgba(129,140,248,0.7)'
+                                     : 'rgba(63,63,70,0.5)',
                         }}
                         transition={{ duration: 0.25 }}
                         className="flex items-center justify-center text-[10px] font-mono font-semibold border"
                         style={{
                           width: CELL_W - 1,
                           height: CELL_H,
-                          color: isHi ? '#fbbf24' : v !== 0 ? '#d4d4d8' : '#52525b',
+                          color: isHi ? '#fbbf24' : isDep ? '#a5b4fc' : v !== 0 ? '#d4d4d8' : '#52525b',
                           margin: '0 auto',
                         }}
                       >
@@ -368,7 +381,7 @@ export default function ArrayViz({
   pointers?: ArrayPointer[];
   windowLeft?: number;
   windowRight?: number;
-  dependsOn?: number[];
+  dependsOn?: Array<number | { r: number; c: number }>;
 }) {
   // Non-primitive elements — route by element kind
   if (!rows && !cols && values.length > 0 && typeof values[0] === 'object' && values[0] !== null && !Array.isArray(values[0])) {
@@ -407,6 +420,7 @@ export default function ArrayViz({
         rows={rows}
         cols={cols}
         lastWrite={lastWrite}
+        dependsOn={dependsOn}
       />
     );
   }
