@@ -87,7 +87,15 @@ export default function GraphViz({
         <div className="flex items-center gap-2 ml-auto">
           {visitedSet.size > 0 && <Legend color="rgba(34,197,94,0.7)" label="visited" />}
           {frontierSet.size > 0 && (
-            <Legend color="rgba(56,189,248,0.85)" label={execution?.frontier?.kind === 'stack' ? 'on stack' : 'in queue'} />
+            <Legend
+              color="rgba(56,189,248,0.85)"
+              label={
+                execution?.frontier?.kind === 'callstack' ? 'on call stack'
+                : execution?.frontier?.kind === 'stack' ? 'on stack'
+                : execution?.frontier?.kind === 'pq' ? 'in pq'
+                : 'in queue'
+              }
+            />
           )}
           {current !== null && <Legend color="#fbbf24" label="active" />}
         </div>

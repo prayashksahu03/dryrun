@@ -309,9 +309,11 @@ def _build_from_edge_list(outer):
 
 # ── role detection ───────────────────────────────────────────────────────────
 
-def _detect_roles(mem: dict, n: int) -> dict:
+def _detect_roles(mem: dict, n: int, mat=None) -> dict:
     """Resolve the observable execution roles for this snapshot: visited set,
-    current/parent node, and the frontier container (+ its discipline)."""
+    current/parent node, and the frontier (a container, or the call stack of a
+    recursive traversal). `mat` is the adjacency matrix, used to recognise the
+    recursion path."""
     stack = mem.get('stack', [])
 
     # visited / dist: a length-n array of 0/1 (not a matrix).
@@ -381,6 +383,14 @@ def _detect_roles(mem: dict, n: int) -> dict:
         if frontier is not None:
             break
 
+    # No container frontier? A recursive DFS has no frontier container — the
+    # CALL STACK is the frontier. The set of open recursive frames' node
+    # arguments IS the DFS path/wavefront, innermost = current.
+    if frontier is None:
+        cs = _callstack_frontier(stack, n, mat)
+        if cs is not None:
+            frontier = cs
+
     # distance: the per-node distance array of a weighted traversal. Only looked
     # for when the frontier is a priority_queue (Dijkstra/Prim), and identified
     # structurally — a length-n int array holding at least one value >= n, i.e.
@@ -437,6 +447,45 @@ def _frontier_members(raw, n):
     return None
 
 
+def _callstack_frontier(stack, n, mat):
+    """The call stack of a recursive traversal, as a frontier. Among the frames
+    of the innermost (recursive) function, the node argument is the int variable —
+    present in every such frame — whose per-frame values form a connected simple
+    PATH in the graph. That path is the DFS wavefront; the innermost is current.
+    Returns {kind:'callstack', members:[path]} or None."""
+    if len(stack) < 2:
+        return None
+    func = stack[-1].get('function')
+    rec = [f for f in stack if f.get('function') == func]
+    if len(rec) < 2:
+        return None
+
+    inner_vars = rec[-1].get('variables', {})
+    best = None
+    for name, v in inner_vars.items():
+        if not (isinstance(v, dict) and v.get('kind') == 'int'):
+            continue
+        seq = []
+        ok = True
+        for f in rec:
+            fv = f.get('variables', {}).get(name)
+            if (isinstance(fv, dict) and fv.get('kind') == 'int'
+                    and isinstance(fv.get('value'), int) and 0 <= fv['value'] < n):
+                seq.append(fv['value'])
+            else:
+                ok = False
+                break
+        if not ok or len(set(seq)) != len(seq):     # must be present in all & distinct
+            continue
+        if mat is not None and not all(mat[seq[i]][seq[i + 1]] for i in range(len(seq) - 1)):
+            continue                                 # consecutive frames must be adjacent
+        if best is None or len(seq) > len(best):
+            best = seq
+    if not best or len(best) < 1:
+        return None
+    return {'kind': 'callstack', 'members': best}
+
+
 def _algorithm_label(roles: dict) -> Optional[str]:
     """Derived, non-load-bearing hint. Never gates rendering."""
     fr = roles.get('frontier')
@@ -445,7 +494,7 @@ def _algorithm_label(roles: dict) -> Optional[str]:
         return 'Dijkstra'
     if fr and fr['kind'] == 'queue' and has_visited:
         return 'BFS'
-    if fr and fr['kind'] == 'stack' and has_visited:
+    if fr and fr['kind'] in ('stack', 'callstack') and has_visited:
         return 'DFS'
     return None
 
@@ -670,8 +719,8 @@ def _annotate_graph(trace: list) -> None:
         st = _detect_structure(mem) if mem else None
         structures.append(st)
         if st is not None:
-            _, n, _, _, _ = st
-            r = _detect_roles(mem, n)
+            _, n, mat, _, _ = st
+            r = _detect_roles(mem, n, mat)
         else:
             r = None
         roles_per_step.append(r)
