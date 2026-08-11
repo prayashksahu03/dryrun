@@ -2628,6 +2628,23 @@ class CppInterpreter:
             return self._call_method_on_stack(base, obj_name, obj_c, method_name, args, line,
                                              arg_cursors=arg_cursors)
 
+        # ── emplace fallback ────────────────────────────────────────────────
+        # With headers stripped, libclang leaves obj.emplace(...) on a heavily
+        # templated container (priority_queue<pair<...>,...>) as a dependent call
+        # that doesn't resolve to a MEMBER_REF_EXPR, so it slips past the method
+        # dispatch above. Recover it from tokens and route to push semantics.
+        _toks = [t.spelling for t in cursor.get_tokens()]
+        if 'emplace' in _toks:
+            ei = _toks.index('emplace')
+            if ei >= 2 and _toks[ei - 1] in ('.', '->'):
+                _obj = _toks[ei - 2]
+                _arg_cs = [c for c in ch
+                           if c is not callee_c
+                           and not (c.kind == CK.UNEXPOSED_EXPR
+                                    and '(*)' in (c.type.spelling if c.type else ''))]
+                _args = [self._eval(c) for c in _arg_cs]
+                return self._call_collection_method(_obj, 'emplace', _args, line)
+
         # ── class constructor call (fn is a class name) ────────────────────
         if fn in self.class_defs:
             args = [self._eval(c) for c in ch
@@ -2896,8 +2913,13 @@ class CppInterpreter:
     def _eval_init_list(self, cursor) -> dict:
         ch         = self._ch(cursor)
         type_spell = cursor.type.spelling if cursor.type else ''
-        # {a, b} used as pair<T,U>
-        if 'pair' in type_spell and len(ch) == 2:
+        # {a, b} used as pair<T,U> — ONLY when the type is a BARE pair. A nested
+        # pair (vector<pair<int,int>>) or an ARRAY of pairs (`pair<int,int>[2]`,
+        # which is how clang types `{{1,4},{2,8}}`) must NOT collapse into one
+        # pair — each {1,4} is an element, so it stays a list of two pairs.
+        _outer = re.sub(r'^(const|volatile)\s+', '', type_spell.replace('std::', '').lstrip()).lstrip()
+        _is_bare_pair = (_outer.startswith('pair<') or _outer == 'pair') and '[' not in type_spell
+        if _is_bare_pair and len(ch) == 2:
             return self._make_pair(self._eval(ch[0]), self._eval(ch[1]))
         # 2D: all children are inner init lists → {{1,3,1},{1,5,1},{4,2,1}}
         if ch and all(c.kind == CK.INIT_LIST_EXPR for c in ch):
@@ -5697,8 +5719,15 @@ class CppInterpreter:
                 return (self._to_int(fst), self._to_int(snd))
             return (self._to_int(v), 0)
 
-        if method_name == 'push':
-            val = args[0] if args else _INT(0)
+        if method_name in ('push', 'emplace'):
+            # Two args → construct a pair in place (a container of pairs, e.g.
+            # priority_queue<pair<int,int>>). This covers emplace(a,b) and the
+            # common lenient push(a,b). One arg → the value itself.
+            if len(args) >= 2:
+                val = {'kind': 'struct',
+                       'fields': {'first': args[0], 'second': args[1]}}
+            else:
+                val = args[0] if args else _INT(0)
             vals.append(val)
             if col.get('ctype') == 'priority_queue':
                 is_min = col.get('min_heap', False)
@@ -5706,7 +5735,7 @@ class CppInterpreter:
             col['values'] = vals
             save()
             self.memory.update_line(line)
-            self._emit(line, f"{real_name}.push({self._fmt(val)}).",
+            self._emit(line, f"{real_name}.{method_name}({self._fmt(val)}).",
                        {'type': 'assign', 'target': real_name, 'value': self._fmt(val)})
             # Queue duplicate detection (#7/#21 Wrong BFS Visited Timing / Missing Visited Array)
             ctype_str = col.get('ctype', '')
