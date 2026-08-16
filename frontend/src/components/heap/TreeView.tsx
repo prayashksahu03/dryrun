@@ -51,7 +51,11 @@ function ptrAddr(v: VariableValue | undefined): string | null {
   return v?.kind === 'pointer' ? v.address : null;
 }
 
-function findRoot(heap: Record<string, HeapBlock>): string | null {
+function isTreeNode(b: HeapBlock): boolean {
+  return 'left' in b.fields || 'right' in b.fields;
+}
+
+function findRoots(heap: Record<string, HeapBlock>): string[] {
   const children = new Set<string>();
   Object.values(heap).forEach(b => {
     const l = ptrAddr(b.fields['left']);
@@ -59,11 +63,13 @@ function findRoot(heap: Record<string, HeapBlock>): string | null {
     if (l) children.add(l);
     if (r) children.add(r);
   });
-  return (
-    Object.entries(heap).find(
-      ([addr, b]) => b.state === 'allocated' && !children.has(addr),
-    )?.[0] ?? null
-  );
+  // Every allocated tree node nothing points to is a root. Rendering ALL of them
+  // (a forest) keeps momentarily-unreachable subtrees on screen during pointer
+  // surgery (swap / rotate / mirror) instead of letting nodes flicker out — and
+  // it renders genuine multi-tree programs (e.g. a mirrored copy) in full.
+  return Object.entries(heap)
+    .filter(([addr, b]) => b.state === 'allocated' && isTreeNode(b) && !children.has(addr))
+    .map(([addr]) => addr);
 }
 
 function collectNodes(n: LayoutNode | null, out: LayoutNode[] = []): LayoutNode[] {
@@ -289,10 +295,19 @@ export default function TreeView({
   const wrapperRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
 
-  const rootAddr = findRoot(heap);
-  const tree     = rootAddr ? buildLayout(rootAddr, heap, 0, { v: 0 }) : null;
-  const nodes    = collectNodes(tree);
-  const edges    = collectEdges(tree);
+  // Lay out a FOREST: every root gets its own tree, placed left-to-right via a
+  // shared leaf counter (a 1-slot gap between trees). A shared `seen` set means
+  // no node is drawn twice. This is what keeps every allocated node on screen —
+  // a subtree that becomes momentarily unreachable mid-swap simply becomes its
+  // own root here, so it stays put instead of vanishing.
+  const roots   = findRoots(heap);
+  const counter = { v: 0 };
+  const seen    = new Set<string>();
+  const trees   = roots
+    .map(r => { const t = buildLayout(r, heap, 0, counter, seen); counter.v += 1; return t; })
+    .filter((t): t is LayoutNode => t !== null);
+  const nodes   = trees.flatMap(t => collectNodes(t));
+  const edges   = trees.flatMap(t => collectEdges(t));
 
   const maxX = nodes.length ? Math.max(...nodes.map(n => n.x)) : 0;
   const maxY = nodes.length ? Math.max(...nodes.map(n => n.y)) : 0;
@@ -320,7 +335,7 @@ export default function TreeView({
     return () => ro.disconnect();
   }, [W, H]);
 
-  if (!rootAddr || !tree) {
+  if (!nodes.length) {
     return <div className="text-zinc-800 text-xs font-mono">no heap allocations yet</div>;
   }
 
