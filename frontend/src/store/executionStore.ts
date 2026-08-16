@@ -68,6 +68,55 @@ async function postExplain(
   return data.explanation as string;
 }
 
+// A tutor "beat": a key step the LLM chose to teach, with grounded narration.
+export interface Beat {
+  step: number;
+  title: string;
+  narration: string;
+}
+
+// Build a compacted whole-trace digest and ask the backend for a guided
+// walkthrough (the LLM picks the key step indices + narration). Large traces are
+// sampled so the payload/latency stay bounded; the returned step indices are
+// still real, so goToStep() can drive the animation to each beat.
+async function postWalkthrough(trace: Trace): Promise<Beat[]> {
+  const steps = trace.steps;
+  const map = (s: TraceStep) => ({
+    index: s.index, line: s.line, description: s.description, event: s.event,
+  });
+  let digest: ReturnType<typeof map>[];
+  if (steps.length <= 160) {
+    digest = steps.map(map);
+  } else {
+    const k = Math.ceil(steps.length / 140);
+    digest = steps.filter((_, i) => i % k === 0 || i === steps.length - 1).map(map);
+  }
+  const notable: ReturnType<typeof map>[] = [];
+  const seenKind = new Set<string>();
+  for (const s of steps) {
+    const t = s.event.type;
+    if (t === 'crash' || t === 'warning') {
+      const kk = t + ':' + ((s.event as { kind?: string }).kind ?? '');
+      if (!seenKind.has(kk)) { seenKind.add(kk); notable.push(map(s)); }
+    }
+    if (notable.length >= 10) break;
+  }
+  const last = steps[steps.length - 1];
+  if (last && !notable.some(n => n.index === last.index)) notable.push(map(last));
+
+  const res = await fetch(`${BACKEND}/walkthrough`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source: trace.source, digest, notable, total_steps: steps.length }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: `Server error ${res.status}` }));
+    throw new Error(err.detail ?? `Server error ${res.status}`);
+  }
+  const data = await res.json();
+  return data.beats as Beat[];
+}
+
 export type Language = 'c' | 'cpp' | 'python';
 
 export type PanelKey = 'stack' | 'heap' | 'callTree' | 'eventLog' | 'explain';
@@ -109,6 +158,15 @@ interface ExecutionStore {
   qa: { q: string; a: string } | null;
   explainStep: (step: number) => Promise<void>;
   askQuestion: (q: string) => Promise<void>;
+
+  // Tutor walkthrough: LLM-chosen beats that drive the animation + code highlight
+  walkthrough: { beats: Beat[]; idx: number } | null;
+  walkLoading: boolean;
+  walkError: string | null;
+  startWalkthrough: () => Promise<void>;
+  nextBeat: () => void;
+  prevBeat: () => void;
+  exitWalkthrough: () => void;
 
   currentFrame: () => TraceStep | null;
   prevFrame: () => TraceStep | null;
@@ -158,6 +216,10 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
   explainError: null,
   currentExplanation: null,
   qa: null,
+
+  walkthrough: null,
+  walkLoading: false,
+  walkError: null,
 
   currentFrame: () => {
     const { trace, currentStep } = get();
@@ -357,4 +419,36 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
       set({ explainLoading: false, explainError: e instanceof Error ? e.message : String(e) });
     }
   },
+
+  // Guided tour: ask the LLM for beats, then drive the animation to the first.
+  startWalkthrough: async () => {
+    const { trace } = get();
+    if (!trace) return;
+    set({ walkLoading: true, walkError: null, walkthrough: null });
+    try {
+      const beats = await postWalkthrough(trace);
+      set({ walkLoading: false, walkthrough: { beats, idx: 0 } });
+      get().goToStep(beats[0].step);
+    } catch (e) {
+      set({ walkLoading: false, walkError: e instanceof Error ? e.message : String(e) });
+    }
+  },
+
+  nextBeat: () => {
+    const w = get().walkthrough;
+    if (!w) return;
+    const idx = Math.min(w.idx + 1, w.beats.length - 1);
+    set({ walkthrough: { ...w, idx } });
+    get().goToStep(w.beats[idx].step);
+  },
+
+  prevBeat: () => {
+    const w = get().walkthrough;
+    if (!w) return;
+    const idx = Math.max(w.idx - 1, 0);
+    set({ walkthrough: { ...w, idx } });
+    get().goToStep(w.beats[idx].step);
+  },
+
+  exitWalkthrough: () => set({ walkthrough: null }),
 }));

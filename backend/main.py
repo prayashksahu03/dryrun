@@ -6,6 +6,7 @@ from typing import Any, Optional, List
 from collections import OrderedDict
 import json
 import os
+import re
 import hashlib
 
 from dotenv import load_dotenv
@@ -317,6 +318,188 @@ async def explain(req: ExplainRequest):
     while len(_EXPLAIN_CACHE) > _EXPLAIN_CACHE_MAX:
         _EXPLAIN_CACHE.popitem(last=False)
     return ExplainResponse(explanation=text, cached=False, model=EXPLAIN_MODEL)
+
+
+# ── Tutor walkthrough (LLM-driven guided tour) ────────────────────────────────
+# The LLM picks the pedagogically important STEPS ("beats") and writes grounded
+# narration for each. The frontend then drives the animation: goToStep(beat.step)
+# moves the visualization AND highlights that step's code line. Still narration
+# only — the LLM never computes; it chooses real step indices and explains facts.
+WALKTHROUGH_SYSTEM = (
+    "You are a data-structures & algorithms tutor guiding a student through a program's "
+    "execution. A deterministic interpreter already ran it; the trace facts below are the "
+    "ONLY source of truth.\n"
+    "Choose 4 to 8 KEY moments (beats) that best teach how this program works: the setup, "
+    "the important moments inside the main loop/recursion, and the outcome (final result or "
+    "the bug). For each beat give the step index and a short explanation.\n"
+    "Rules:\n"
+    "- Pick ONLY step indices that appear in the facts.\n"
+    "- Explain from the facts only; never compute, invent, or predict a value.\n"
+    "- title: 3-6 words. narration: 1-2 plain sentences citing the real values at that step.\n"
+    "- Order beats by step index ascending; don't repeat a step.\n"
+    'Return ONLY a JSON object of this exact shape, no prose:\n'
+    '{"beats": [{"step": <int>, "title": "<short>", "narration": "<1-2 sentences>"}, ...]}'
+)
+
+_WALK_CACHE: "OrderedDict[str, list]" = OrderedDict()
+_WALK_CACHE_MAX = 128
+
+
+class WalkStep(BaseModel):
+    index: int
+    line: int
+    description: str = ''
+    event: dict[str, Any] = {}
+
+
+class WalkthroughRequest(BaseModel):
+    source: str
+    digest: List[WalkStep] = []      # compacted whole-trace step list (no memory)
+    notable: List[WalkStep] = []     # crashes / warnings / end
+    total_steps: int = 0
+
+
+class Beat(BaseModel):
+    step: int
+    title: str
+    narration: str
+
+
+class WalkthroughResponse(BaseModel):
+    beats: List[Beat]
+    cached: bool = False
+    model: str
+
+
+def _parse_beats(text: str):
+    """Extract the beats list from an LLM reply. Tolerates JSON-mode objects
+    ({"beats": [...]}), a bare array, ``` fences, prose, and trailing commas."""
+    if not text:
+        return None
+    text = text.strip()
+
+    def _try(s):
+        if not s:
+            return None
+        try:
+            return json.loads(s)
+        except json.JSONDecodeError:
+            try:  # tolerate trailing commas: [1,2,] / {..,}
+                return json.loads(re.sub(r',(\s*[\]}])', r'\1', s))
+            except json.JSONDecodeError:
+                return None
+
+    candidates = [text]
+    mo = re.search(r'\{.*\}', text, re.DOTALL)
+    if mo:
+        candidates.append(mo.group(0))
+    ma = re.search(r'\[.*\]', text, re.DOTALL)
+    if ma:
+        candidates.append(ma.group(0))
+
+    for c in candidates:
+        d = _try(c)
+        if isinstance(d, dict) and isinstance(d.get('beats'), list):
+            return d['beats']
+        if isinstance(d, list):
+            return d
+    return None
+
+
+def _build_walk_facts(req: WalkthroughRequest) -> str:
+    parts = ["Source:\n```cpp\n" + req.source + "\n```"]
+    if req.digest:
+        lines = []
+        for s in req.digest:
+            summ = _event_summary(s.event)
+            summ = f"  [{summ}]" if summ else ""
+            lines.append(f"#{s.index} line {s.line}: {s.description}{summ}")
+        parts.append(f"Execution trace ({req.total_steps} steps total; key steps shown):\n"
+                     + "\n".join(lines))
+    if req.notable:
+        lines = [f"#{s.index} line {s.line}: {s.description}" for s in req.notable]
+        parts.append("Notable events (warnings / crashes / end):\n" + "\n".join(lines))
+    parts.append("Pick the 4-8 most instructive beats and return the JSON array.")
+    return "\n\n".join(parts)
+
+
+def _run_walkthrough(req: WalkthroughRequest) -> list:
+    client = _get_explain_client()
+    if client is None:
+        raise HTTPException(status_code=503,
+                            detail="Tutor is unavailable — the LLM client isn't installed.")
+    facts = _build_walk_facts(req)
+    if len(facts) > _SNAPSHOT_CHAR_CAP * 2:
+        facts = facts[:_SNAPSHOT_CHAR_CAP * 2] + "\n...(truncated)"
+    kwargs = dict(
+        model=EXPLAIN_MODEL,
+        max_tokens=900,
+        temperature=0.2,
+        messages=[
+            {"role": "system", "content": WALKTHROUGH_SYSTEM},
+            {"role": "user",   "content": facts},
+        ],
+    )
+    # JSON mode forces syntactically valid output. Fall back gracefully if the
+    # provider rejects the param (older/other backends).
+    try:
+        resp = client.chat.completions.create(
+            response_format={"type": "json_object"}, **kwargs)
+    except Exception:
+        resp = client.chat.completions.create(**kwargs)
+    raw = (resp.choices[0].message.content or "").strip()
+    parsed = _parse_beats(raw)
+    if not isinstance(parsed, list):
+        raise HTTPException(status_code=502, detail="Tutor returned an unreadable plan. Try again.")
+
+    # Validate: keep beats whose step index is real; clamp/dedupe; order ascending.
+    valid_max = req.total_steps - 1 if req.total_steps > 0 else max(
+        (s.index for s in req.digest), default=0)
+    beats, seen = [], set()
+    for b in parsed:
+        if not isinstance(b, dict):
+            continue
+        try:
+            step = int(b.get('step'))
+        except (TypeError, ValueError):
+            continue
+        if step < 0 or step > valid_max or step in seen:
+            continue
+        seen.add(step)
+        beats.append({
+            'step': step,
+            'title': str(b.get('title', ''))[:80],
+            'narration': str(b.get('narration', ''))[:600],
+        })
+    beats.sort(key=lambda x: x['step'])
+    if not beats:
+        raise HTTPException(status_code=502, detail="Tutor couldn't build a valid walkthrough. Try again.")
+    return beats
+
+
+@app.post("/walkthrough", response_model=WalkthroughResponse)
+async def walkthrough(req: WalkthroughRequest):
+    if len(req.source) > 12000:
+        raise HTTPException(status_code=400, detail="Source code too long (max 12000 chars).")
+    key = hashlib.sha256(req.source.encode('utf-8', 'ignore')).hexdigest()[:16]
+    if key in _WALK_CACHE:
+        _WALK_CACHE.move_to_end(key)
+        return WalkthroughResponse(beats=_WALK_CACHE[key], cached=True, model=EXPLAIN_MODEL)
+    try:
+        beats = _run_walkthrough(req)
+    except HTTPException:
+        raise
+    except Exception as e:
+        name = type(e).__name__
+        if 'Connection' in name or 'Timeout' in name:
+            raise HTTPException(status_code=503,
+                                detail="Tutor is unavailable — is Ollama running with the model pulled?")
+        raise HTTPException(status_code=502, detail=f"LLM error ({name}). Try again.")
+    _WALK_CACHE[key] = beats
+    _WALK_CACHE.move_to_end(key)
+    while len(_WALK_CACHE) > _WALK_CACHE_MAX:
+        _WALK_CACHE.popitem(last=False)
+    return WalkthroughResponse(beats=beats, cached=False, model=EXPLAIN_MODEL)
 
 
 @app.get("/health")
