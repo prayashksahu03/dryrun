@@ -48,6 +48,12 @@ export const TOUR_STEPS: TourStep[] = [
     placement: 'left',
   },
   {
+    target: '[data-tour="explain-panel"]',
+    title: 'AI Tutor',
+    body: 'Stuck? Ask the tutor. It explains any step from the real trace values — never guessed. Or describe what confuses you and it builds a guided slideshow that drives the animation + code through exactly the steps that answer your doubt.',
+    placement: 'left',
+  },
+  {
     target: '[data-tour="learn-button"]',
     title: 'Learn Mode',
     body: 'Pick a guided walkthrough — Pointers, Heap, Recursion, Linked List, or Binary Search — and get author-written hints at every key moment.',

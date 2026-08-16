@@ -32,7 +32,7 @@ export default function ExplainPanel() {
   };
 
   return (
-    <div className="flex-shrink-0 flex flex-col border-t border-zinc-800/60 max-h-[48%] overflow-hidden">
+    <div data-tour="explain-panel" className="flex-shrink-0 flex flex-col border-t border-zinc-800/60 max-h-[48%] overflow-hidden">
       <div className="px-3 py-2 flex items-center justify-between flex-shrink-0">
         <span className="text-[10px] text-zinc-600 uppercase tracking-widest font-mono flex items-center gap-1.5">
           <span className="text-indigo-400/70">✦</span> Tutor
