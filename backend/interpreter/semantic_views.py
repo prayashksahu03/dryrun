@@ -208,21 +208,30 @@ def _build_from_adjacency_list(outer, n):
     is the destination node and the other the weight. Which field is the
     destination is inferred by scanning all pairs (a field whose value ever falls
     outside [0, n) cannot be the destination)."""
-    # Must be a list of inner arrays.
-    if not all(isinstance(el, dict) and el.get('kind') == 'array'
-               and isinstance(el.get('values'), list) for el in outer):
+    # Must be a list of inner arrays. Nested arrays come in two representations:
+    # a dict {kind:'array', values:[...]} (ctor-built) or a raw Python list
+    # (init-list-built, e.g. vector<vector<int>> graph = {{1,2},...}). Normalise
+    # both to the inner value list so either shape is recognised.
+    def _inner(el):
+        if isinstance(el, dict) and el.get('kind') == 'array' and isinstance(el.get('values'), list):
+            return el['values']
+        if isinstance(el, list):
+            return el
+        return None
+
+    inners = [_inner(el) for el in outer]
+    if any(x is None for x in inners):
         return None
 
     weighted = any(
-        len(el['values']) > 0 and isinstance(el['values'][0], dict)
-        and el['values'][0].get('kind') == 'struct'
-        for el in outer
+        len(vs) > 0 and isinstance(vs[0], dict) and vs[0].get('kind') == 'struct'
+        for vs in inners
     )
 
     first_ok = True
     second_ok = True
-    for el in outer:
-        for nb in el['values']:
+    for vs in inners:
+        for nb in vs:
             if not (isinstance(nb, dict) and nb.get('kind') == 'struct'):
                 continue
             fields = nb.get('fields') or {}
@@ -253,15 +262,15 @@ def _build_from_adjacency_list(outer, n):
         return 1
 
     # Every neighbour must resolve to a valid node.
-    for el in outer:
-        for nb in el['values']:
+    for vs in inners:
+        for nb in vs:
             if dest_of(nb) is None:
                 return None
 
     mat = [[0] * n for _ in range(n)]
     wmat = [[0] * n for _ in range(n)]
     for i in range(n):
-        for nb in outer[i]['values']:
+        for nb in inners[i]:
             d = dest_of(nb)
             if d is not None:
                 mat[i][d] = 1

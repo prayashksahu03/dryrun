@@ -2948,8 +2948,15 @@ class CppInterpreter:
         if ch and all(c.kind == CK.INIT_LIST_EXPR for c in ch):
             rows = [[self._to_int(self._eval(e)) for e in self._ch(rc)] for rc in ch]
             n_rows = len(rows)
-            n_cols = max((len(r) for r in rows), default=0)
-            return {'kind': 'array', 'values': rows, 'rows': n_rows, 'cols': n_cols}
+            lengths = {len(r) for r in rows}
+            # Only a RECTANGULAR nested array is a matrix/grid — stamp rows/cols so
+            # it renders as a 2D grid. A JAGGED one (rows of differing length) is
+            # almost always an adjacency list (vector<vector<int>>); leave rows/cols
+            # unset so the graph detector recognises it and it isn't drawn as a
+            # bogus NxM grid.
+            if len(lengths) == 1:
+                return {'kind': 'array', 'values': rows, 'rows': n_rows, 'cols': lengths.pop()}
+            return {'kind': 'array', 'values': rows}
         vals = []
         for c in ch:
             v = self._eval(c)
@@ -5119,10 +5126,15 @@ class CppInterpreter:
                 return result
 
         if is_2d:
-            # Init from {{row},{row},...} — already parsed as 2D array by _eval_init_list
+            # Init from {{row},{row},...} — already parsed as a nested array by
+            # _eval_init_list. Distinguish this from the count ctor vector(n) by
+            # SHAPE, not by 'rows': a jagged adjacency list (no rows/cols) still
+            # has nested values, whereas vector<vector<int>>(n)'s arg is an int.
             if real_args:
                 first_val = self._eval(real_args[0])
-                if isinstance(first_val, dict) and first_val.get('kind') == 'array' and first_val.get('rows'):
+                if (isinstance(first_val, dict) and first_val.get('kind') == 'array'
+                        and (first_val.get('rows') is not None
+                             or any(isinstance(v, (list, dict)) for v in first_val.get('values', [])))):
                     return copy.deepcopy(first_val)
             n = self._to_int(self._eval(real_args[0])) if real_args else 0
             if len(real_args) <= 1:
@@ -5616,8 +5628,17 @@ class CppInterpreter:
         is_ref = ('&' in (loop_var_c.type.spelling if loop_var_c and loop_var_c.type else ''))
         range_name = self._cursor_name(range_c) if is_ref and not binding_vars else None
 
-        # Track initial container size for modify-during-iteration check (#15)
-        range_container_name = self._cursor_name(range_c) if range_c else None
+        # Track initial container size for modify-during-iteration check (#15).
+        # The synthetic iterator-invalidation buffer + this check only make sense
+        # for a NAMED vector variable. For a subscript/temporary range like
+        # `graph[u]`, _cursor_name() returns "operator[]", which would spawn a
+        # bogus "operator[][ ] buffer" heap block every iteration — skip those.
+        _rc = range_c
+        while _rc is not None and _rc.kind in (CK.UNEXPOSED_EXPR, CK.PAREN_EXPR):
+            _sub = self._ch(_rc)
+            _rc = _sub[0] if _sub else None
+        _range_is_named_var = _rc is not None and _rc.kind == CK.DECL_REF_EXPR
+        range_container_name = self._cursor_name(range_c) if (range_c and _range_is_named_var) else None
         initial_container_size = len(elements)
 
         # ── Iterator invalidation visualization (#14) ──────────────────────────
