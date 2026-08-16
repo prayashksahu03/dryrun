@@ -25,15 +25,24 @@ function buildLayout(
   heap: Record<string, HeapBlock>,
   depth: number,
   counter: { v: number },
+  seen: Set<string> = new Set(),
 ): LayoutNode | null {
-  if (!addr || !heap[addr]) return null;
+  if (!addr || !heap[addr] || seen.has(addr)) return null;  // guard cycles
+  seen.add(addr);
   const block = heap[addr];
   const leftAddr  = ptrAddr(block.fields['left']);
   const rightAddr = ptrAddr(block.fields['right']);
 
-  const left  = buildLayout(leftAddr,  heap, depth + 1, counter);
-  const x     = counter.v++;
-  const right = buildLayout(rightAddr, heap, depth + 1, counter);
+  const left  = buildLayout(leftAddr,  heap, depth + 1, counter, seen);
+  const right = buildLayout(rightAddr, heap, depth + 1, counter, seen);
+
+  // Center a parent over its children so edges stay short and mostly vertical.
+  // Leaves consume sequential horizontal slots; internal nodes sit at the
+  // midpoint of their subtree, which keeps parent→child edges from crossing.
+  const kids = [left, right].filter(Boolean) as LayoutNode[];
+  const x = kids.length
+    ? (kids[0].x + kids[kids.length - 1].x) / 2
+    : counter.v++;
 
   return { addr, x, y: depth, left, right };
 }
@@ -221,18 +230,20 @@ function EdgeSVG({
       style={{ overflow: 'visible' }}
     >
       {edges.map(([parent, child, side]) => {
-        const x1 = px(parent.x);
+        const isLeft = side === 'left';
+        // Left edge leaves the parent's bottom-LEFT, right edge its bottom-RIGHT,
+        // so which pointer goes where is obvious from geometry, not just the badge.
+        const x1 = px(parent.x) + (isLeft ? -NODE_W * 0.28 : NODE_W * 0.28);
         const y1 = py(parent.y) + NODE_H;
         const x2 = px(child.x);
         const y2 = py(child.y);
-        const cy1 = y1 + Y_GAP * 0.45;
-        const cy2 = y2 - Y_GAP * 0.45;
+        const cy1 = y1 + Y_GAP * 0.5;
+        const cy2 = y2 - Y_GAP * 0.5;
 
-        const isLeft = side === 'left';
-        const color  = isLeft ? 'rgba(99,102,241,0.7)' : 'rgba(34,197,94,0.6)';
-        const glow   = isLeft ? 'rgba(99,102,241,0.15)' : 'rgba(34,197,94,0.1)';
+        const color  = isLeft ? 'rgba(129,140,248,0.85)' : 'rgba(52,211,153,0.8)';
+        const glow   = isLeft ? 'rgba(99,102,241,0.15)' : 'rgba(34,197,94,0.12)';
         const label  = isLeft ? 'L' : 'R';
-        const lx = (x1 + x2) / 2 + (isLeft ? -14 : 14);
+        const lx = x1 + (x2 - x1) * 0.5;
         const ly = (y1 + y2) / 2;
 
         const d = `M ${x1} ${y1} C ${x1} ${cy1} ${x2} ${cy2} ${x2} ${y2}`;
@@ -242,7 +253,7 @@ function EdgeSVG({
             {/* Glow */}
             <path d={d} stroke={glow} strokeWidth={6} fill="none" strokeLinecap="round" />
             {/* Line */}
-            <path d={d} stroke={color} strokeWidth={1.5} fill="none" strokeLinecap="round" />
+            <path d={d} stroke={color} strokeWidth={2.2} fill="none" strokeLinecap="round" />
             {/* Arrowhead */}
             <polygon
               points={`${x2},${y2} ${x2 - 4},${y2 - 8} ${x2 + 4},${y2 - 8}`}
