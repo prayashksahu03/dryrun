@@ -3538,6 +3538,12 @@ class CppInterpreter:
                 vals = args[0].get('values', [])
                 return _INT(max(self._to_int(v) for v in vals)) if vals else _INT(0)
             return _INT(0)
+        # A user-defined function ALWAYS shadows a built-in STL-name handler of the
+        # same name — a linked-list reverse()/merge()/find(), a union-find find(),
+        # etc. Route straight to the user body before any std:: interception below.
+        # (sort/swap already had this guard per-branch; this makes it uniform.)
+        if fn_name in self.func_defs:
+            return self._call_user_function(fn_name, args, line, arg_cursors=arg_cursors)
         if fn_name == 'swap' and len(args) >= 2 and fn_name not in self.func_defs:
             val_a = copy.deepcopy(args[0])
             val_b = copy.deepcopy(args[1])
