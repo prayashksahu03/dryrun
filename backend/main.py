@@ -151,6 +151,27 @@ def _get_explain_client():
     return _explain_client
 
 
+def _llm_http_error(e: Exception) -> HTTPException:
+    """Map an LLM-client exception to a friendly HTTP error. Provider-neutral
+    (works for Ollama, Groq, etc.) and inspects names/status so we don't need to
+    hard-import the SDK's exception classes."""
+    name = type(e).__name__
+    status = getattr(e, 'status_code', None) or getattr(e, 'status', None)
+    if 'RateLimit' in name or status == 429:
+        return HTTPException(
+            status_code=429,
+            detail="The tutor is busy right now (rate limit) — try again in a few seconds.")
+    if 'Connection' in name or 'Timeout' in name or status == 503:
+        return HTTPException(
+            status_code=503,
+            detail="The tutor's model provider is unreachable right now. Try again shortly.")
+    if 'Authentication' in name or status in (401, 403):
+        return HTTPException(
+            status_code=502,
+            detail="The tutor's LLM API key looks invalid — check EXPLAIN_API_KEY on the server.")
+    return HTTPException(status_code=502, detail=f"LLM error ({name}). Try again.")
+
+
 EXPLAIN_SYSTEM = (
     "You are a C/C++ execution tutor inside DryRun. A deterministic interpreter has already "
     "executed the program and produced the trace facts below — they are the ONLY source of truth.\n"
@@ -303,15 +324,7 @@ async def explain(req: ExplainRequest):
     except HTTPException:
         raise
     except Exception as e:
-        # Distinguish "provider unreachable" (Ollama down / model not pulled) from other errors,
-        # without hard-importing openai's exception classes (SDK may be absent).
-        name = type(e).__name__
-        if 'Connection' in name or 'Timeout' in name:
-            raise HTTPException(
-                status_code=503,
-                detail="Explain is unavailable — is Ollama running with the model pulled? "
-                       "(ollama serve; ollama pull qwen2.5-coder:7b)")
-        raise HTTPException(status_code=502, detail=f"LLM error ({name}). Try again.")
+        raise _llm_http_error(e)
 
     _EXPLAIN_CACHE[key] = text
     _EXPLAIN_CACHE.move_to_end(key)
@@ -501,11 +514,7 @@ async def walkthrough(req: WalkthroughRequest):
     except HTTPException:
         raise
     except Exception as e:
-        name = type(e).__name__
-        if 'Connection' in name or 'Timeout' in name:
-            raise HTTPException(status_code=503,
-                                detail="Tutor is unavailable — is Ollama running with the model pulled?")
-        raise HTTPException(status_code=502, detail=f"LLM error ({name}). Try again.")
+        raise _llm_http_error(e)
     _WALK_CACHE[key] = beats
     _WALK_CACHE.move_to_end(key)
     while len(_WALK_CACHE) > _WALK_CACHE_MAX:
