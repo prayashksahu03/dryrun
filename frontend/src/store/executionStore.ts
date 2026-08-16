@@ -60,6 +60,7 @@ interface ExecutionStore {
   setLanguage: (lang: Language) => void;
   togglePanel: (panel: PanelKey) => void;
   runCode: () => Promise<void>;
+  reportIssue: (note?: string) => Promise<boolean>;
   clearTrace: () => void;
   loadDemo: () => void;
   loadGuidedProgram: (program: GuidedProgram) => Promise<void>;
@@ -216,6 +217,23 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
           ? 'Cannot reach backend.\nRun in a new terminal:\n  cd ~/dryrun/backend\n  pip install -r requirements.txt\n  uvicorn main:app --reload'
           : msg,
       });
+    }
+  },
+
+  // Report a wrong/degraded animation. The interpreter rarely errors — it fails
+  // silently — so the user's "this looks wrong" is the honest failure signal.
+  reportIssue: async (note = '') => {
+    const { editorSource, language } = get();
+    if (!editorSource.trim()) return false;
+    try {
+      const res = await fetch(`${BACKEND}/report`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: editorSource, language, note }),
+      });
+      return res.ok;
+    } catch {
+      return false;
     }
   },
 }));

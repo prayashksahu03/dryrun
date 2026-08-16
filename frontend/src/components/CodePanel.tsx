@@ -55,6 +55,9 @@ function parseErrorLine(msg: string): number | null {
 }
 
 function parseErrorType(msg: string): string {
+  // Escape hatch: an honest "we can't visualize this yet" is NOT a user error —
+  // label it calmly so it reads as a coverage gap, not a crash.
+  if (/can'?t visualize|not supported|doesn'?t handle|doesn'?t support/i.test(msg)) return 'Not Supported Yet';
   if (/segfault|segmentation|null pointer|use-after-free|double free/i.test(msg)) return 'Runtime Error';
   if (/is never defined|not declared|undeclared/i.test(msg)) return 'Undefined Symbol';
   if (/syntax|unexpected|expected/i.test(msg)) return 'Syntax Error';
@@ -94,15 +97,23 @@ function EditorMode() {
   const {
     editorSource, setEditorSource, stdinInput, setStdinInput,
     runCode, isLoading, error, language,
-    trace, currentFrame, clearTrace,
+    trace, currentFrame, clearTrace, reportIssue,
   } = useExecutionStore();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const activeLineRef = useRef<HTMLDivElement>(null);
   const gutterRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [stdinOpen, setStdinOpen] = useState(true);
+  const [reported, setReported] = useState(false);
+
+  const handleReport = async () => {
+    const ok = await reportIssue();
+    if (ok) { setReported(true); setTimeout(() => setReported(false), 2500); }
+  };
   const errorLine   = error ? parseErrorLine(error) : null;
   const errorType   = error ? parseErrorType(error) : null;
+  // A coverage-gap ("Not Supported Yet") is shown in a calm amber, not alarming red.
+  const softError   = errorType === 'Not Supported Yet';
 
   const { gateOpen, attemptRun, onFeedbackSubmitted } = useFeedbackGate();
 
@@ -155,6 +166,20 @@ function EditorMode() {
         </div>
         <div />
         <div className="flex items-center gap-2">
+          {trace && (
+            <button
+              onClick={handleReport}
+              disabled={reported}
+              className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-mono transition-all ${
+                reported
+                  ? 'text-emerald-400 cursor-default'
+                  : 'text-zinc-500 hover:text-amber-300 border border-zinc-700/60 hover:border-amber-500/40'
+              }`}
+              title="Report that this animation looks wrong — it's logged so we can fix the gap"
+            >
+              {reported ? '✓ reported, thanks' : '⚑ looks wrong?'}
+            </button>
+          )}
           <button
             data-tour="run-button"
             onClick={handleRun}
@@ -307,18 +332,18 @@ function EditorMode() {
             : (frame?.description ?? 'Step through with → or press Space to play.')}
         </div>
       ) : error ? (
-        <div className="border-t border-red-500/40 bg-[#110a0a] flex-shrink-0">
-          <div className="flex items-center gap-2 px-3 py-2 border-b border-red-500/20">
-            <span className="flex-shrink-0 w-4 h-4 rounded-full bg-red-500/20 border border-red-500/50 flex items-center justify-center text-[9px] text-red-400 font-bold">!</span>
-            <span className="text-[10px] font-mono font-semibold text-red-400 uppercase tracking-wider">{errorType}</span>
-            {errorLine && (
+        <div className={`border-t flex-shrink-0 ${softError ? 'border-amber-500/40 bg-[#12100a]' : 'border-red-500/40 bg-[#110a0a]'}`}>
+          <div className={`flex items-center gap-2 px-3 py-2 border-b ${softError ? 'border-amber-500/20' : 'border-red-500/20'}`}>
+            <span className={`flex-shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold ${softError ? 'bg-amber-500/20 border border-amber-500/50 text-amber-400' : 'bg-red-500/20 border border-red-500/50 text-red-400'}`}>{softError ? '?' : '!'}</span>
+            <span className={`text-[10px] font-mono font-semibold uppercase tracking-wider ${softError ? 'text-amber-400' : 'text-red-400'}`}>{errorType}</span>
+            {errorLine && !softError && (
               <span className="ml-auto text-[10px] font-mono text-red-500/70 border border-red-500/30 px-1.5 py-0.5 rounded bg-red-500/10">
                 line {errorLine}
               </span>
             )}
           </div>
           <div className="px-3 py-2.5 max-h-32 overflow-y-auto">
-            <pre className="text-[10px] font-mono text-red-300/90 whitespace-pre-wrap leading-relaxed">{error}</pre>
+            <pre className={`text-[10px] font-mono whitespace-pre-wrap leading-relaxed ${softError ? 'text-amber-200/90' : 'text-red-300/90'}`}>{error}</pre>
           </div>
         </div>
       ) : (
