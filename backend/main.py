@@ -147,7 +147,13 @@ def _get_explain_client():
     if not _OPENAI_AVAILABLE:
         return None
     if _explain_client is None:
-        _explain_client = OpenAI(base_url=EXPLAIN_BASE_URL, api_key=EXPLAIN_API_KEY)
+        # max_retries: the SDK retries transient 429/5xx/connection blips with
+        # exponential backoff before surfacing — important on free-tier providers
+        # (Groq) that briefly 503 under load. timeout bounds a hung request.
+        _explain_client = OpenAI(
+            base_url=EXPLAIN_BASE_URL, api_key=EXPLAIN_API_KEY,
+            max_retries=4, timeout=45.0,
+        )
     return _explain_client
 
 
