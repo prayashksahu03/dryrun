@@ -182,6 +182,7 @@ class ExplainRequest(BaseModel):
     question: Optional[str] = None
     window: List[ExplainStep] = []     # ~6 steps ending at current_step (no per-step memory)
     snapshot: dict[str, Any] = {}      # current step only: {memory, execution?, graph?, grid?, ...}
+    notable: List[ExplainStep] = []    # whole-run crashes/warnings/end — for "what went wrong" Qs
 
 
 class ExplainResponse(BaseModel):
@@ -242,6 +243,18 @@ def _build_facts(req: ExplainRequest) -> str:
         val = snap.get(key)
         if val:
             parts.append(f"{key} descriptor:\n" + json.dumps(val, default=str))
+
+    # Whole-run diagnostics — crashes, warnings, and the final/end step. These are
+    # often the real answer to "what's the error / why did it crash", even when
+    # they occurred far from the current step's window.
+    if req.notable:
+        lines = []
+        for s in req.notable:
+            summ = _event_summary(s.event)
+            summ = f"  [{summ}]" if summ else ""
+            lines.append(f"#{s.index} line {s.line}: {s.description}{summ}")
+        parts.append("Notable events across the full run (warnings / crashes / program end):\n"
+                     + "\n".join(lines))
 
     facts = "\n\n".join(parts)
     if len(facts) > _SNAPSHOT_CHAR_CAP:

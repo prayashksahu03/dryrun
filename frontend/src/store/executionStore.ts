@@ -31,12 +31,33 @@ async function postExplain(
     deps:      cur?.deps ?? null,
     dsu:       cur?.dsu ?? null,
   };
+  // Whole-program signal for "what went wrong / why did it crash" questions:
+  // crashes, warnings (one per kind), and the final step (end/truncation) — these
+  // often live far from the current step's window but are exactly what diagnoses
+  // a bug. Deduped by warning kind and capped so the payload stays small.
+  const notable: typeof window = [];
+  const seenKind = new Set<string>();
+  for (const s of trace.steps) {
+    const t = s.event.type;
+    if (t === 'crash' || t === 'warning') {
+      const k = t + ':' + ((s.event as { kind?: string }).kind ?? '');
+      if (!seenKind.has(k)) {
+        seenKind.add(k);
+        notable.push({ index: s.index, line: s.line, description: s.description, event: s.event });
+      }
+    }
+    if (notable.length >= 10) break;
+  }
+  const lastStep = trace.steps[trace.steps.length - 1];
+  if (lastStep && !notable.some(n => n.index === lastStep.index)) {
+    notable.push({ index: lastStep.index, line: lastStep.line, description: lastStep.description, event: lastStep.event });
+  }
   const res = await fetch(`${BACKEND}/explain`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       source: trace.source, current_step: step, mode,
-      question: question ?? null, window, snapshot,
+      question: question ?? null, window, snapshot, notable,
     }),
   });
   if (!res.ok) {
