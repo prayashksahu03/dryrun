@@ -273,8 +273,14 @@ function EditorMode() {
             }
           }}
           spellCheck={false}
+          // wrap="off": long lines must scroll horizontally, never soft-wrap.
+          // The gutter (▶ marker) and the active-line stripe both position by
+          // (line-1) * 1.6rem, assuming one visual row per logical line. A soft
+          // wrapped line above the cursor pushes the real code down a row while
+          // the marker stays put — so the marker drifts one line high per wrap.
+          wrap="off"
           className="flex-1 bg-transparent text-zinc-300 text-xs font-mono leading-[1.6rem] py-3 pr-4 resize-none outline-none border-none relative z-10"
-          style={{ caretColor: '#c084fc' }}
+          style={{ caretColor: '#c084fc', whiteSpace: 'pre', overflowX: 'auto' }}
           placeholder={`Write your ${LANG_LABELS[language]} code here...`}
         />
       </div>
