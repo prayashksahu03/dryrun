@@ -9,15 +9,54 @@ const BACKEND = import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:8000';
 
 const DEMOS: Trace[] = [danglingPointerTrace];
 
+// Build the grounding payload and POST to /explain. The LLM only ever sees a
+// trimmed window (no per-step memory) plus the CURRENT step's snapshot — the
+// facts it explains are the interpreter's, never computed.
+async function postExplain(
+  trace: Trace,
+  step: number,
+  mode: 'step' | 'question',
+  question?: string,
+): Promise<string> {
+  const lo = Math.max(0, step - 5);
+  const window = trace.steps.slice(lo, step + 1).map(s => ({
+    index: s.index, line: s.line, description: s.description, event: s.event,
+  }));
+  const cur = trace.steps[step];
+  const snapshot = {
+    memory:    cur?.memory ?? null,
+    execution: cur?.execution ?? null,
+    graph:     cur?.graph ?? null,
+    grid:      cur?.grid ?? null,
+    deps:      cur?.deps ?? null,
+    dsu:       cur?.dsu ?? null,
+  };
+  const res = await fetch(`${BACKEND}/explain`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      source: trace.source, current_step: step, mode,
+      question: question ?? null, window, snapshot,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: `Server error ${res.status}` }));
+    throw new Error(err.detail ?? `Server error ${res.status}`);
+  }
+  const data = await res.json();
+  return data.explanation as string;
+}
+
 export type Language = 'c' | 'cpp' | 'python';
 
-export type PanelKey = 'stack' | 'heap' | 'callTree' | 'eventLog';
+export type PanelKey = 'stack' | 'heap' | 'callTree' | 'eventLog' | 'explain';
 
 export const PANEL_LABELS: Record<PanelKey, string> = {
   stack:    'Stack',
   heap:     'Heap',
   callTree: 'Call Tree',
   eventLog: 'Event Log',
+  explain:  'Explain',
 };
 
 interface ExecutionStore {
@@ -40,6 +79,15 @@ interface ExecutionStore {
   ambiguities: Ambiguity[];
   vizHints: Record<string, VizHint>;
   setVizHints: (hints: Record<string, VizHint>) => void;
+
+  // Explain tutor (grounded LLM narration — never in the execution path)
+  explanationCache: Record<string, string>;
+  explainLoading: boolean;
+  explainError: string | null;
+  currentExplanation: string | null;
+  qa: { q: string; a: string } | null;
+  explainStep: (step: number) => Promise<void>;
+  askQuestion: (q: string) => Promise<void>;
 
   currentFrame: () => TraceStep | null;
   prevFrame: () => TraceStep | null;
@@ -78,11 +126,17 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
   error: null,
   demoIndex: 0,
   language: 'cpp' as Language,
-  panels: { stack: true, heap: true, callTree: true, eventLog: true },
+  panels: { stack: true, heap: true, callTree: true, eventLog: true, explain: true },
   activeGuidedProgram: null,
   ambiguities: [],
   vizHints: {},
   setVizHints: (hints) => set({ vizHints: hints }),
+
+  explanationCache: {},
+  explainLoading: false,
+  explainError: null,
+  currentExplanation: null,
+  qa: null,
 
   currentFrame: () => {
     const { trace, currentStep } = get();
@@ -234,6 +288,52 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
       return res.ok;
     } catch {
       return false;
+    }
+  },
+
+  // On-demand only (button click), never auto-per-step. Local cache first, so
+  // re-explaining a step is instant and costs nothing.
+  explainStep: async (step) => {
+    const { trace } = get();
+    if (!trace) return;
+    const key = `${step}:step:`;
+    const cached = get().explanationCache[key];
+    if (cached) {
+      set({ currentExplanation: cached, explainError: null, explainLoading: false });
+      return;
+    }
+    set({ explainLoading: true, explainError: null, currentExplanation: null });
+    try {
+      const text = await postExplain(trace, step, 'step');
+      set(s => ({
+        currentExplanation: text,
+        explainLoading: false,
+        explanationCache: { ...s.explanationCache, [key]: text },
+      }));
+    } catch (e) {
+      set({ explainLoading: false, explainError: e instanceof Error ? e.message : String(e) });
+    }
+  },
+
+  askQuestion: async (q) => {
+    const { trace, currentStep } = get();
+    if (!trace || !q.trim()) return;
+    const key = `${currentStep}:question:${q}`;
+    const cached = get().explanationCache[key];
+    if (cached) {
+      set({ qa: { q, a: cached }, explainError: null, explainLoading: false });
+      return;
+    }
+    set({ explainLoading: true, explainError: null });
+    try {
+      const text = await postExplain(trace, currentStep, 'question', q);
+      set(s => ({
+        qa: { q, a: text },
+        explainLoading: false,
+        explanationCache: { ...s.explanationCache, [key]: text },
+      }));
+    } catch (e) {
+      set({ explainLoading: false, explainError: e instanceof Error ? e.message : String(e) });
     }
   },
 }));

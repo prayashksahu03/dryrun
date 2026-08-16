@@ -3,6 +3,7 @@ import { useExecutionStore, PanelKey } from '../store/executionStore';
 import { StepEvent } from '../types/trace';
 import CallTreePanel from './CallTreePanel';
 import ErrorExplainer from './ErrorExplainer';
+import ExplainPanel from './ExplainPanel';
 
 const CRASH_LABELS: Record<string, string> = {
   'null-deref':        'Null Pointer Dereference',
@@ -112,6 +113,7 @@ export default function InspectorPanel() {
   const showCallTree = panels['callTree' as PanelKey];
   const showHeap     = panels['heap'     as PanelKey];
   const showEventLog = panels['eventLog' as PanelKey];
+  const showExplain  = panels['explain'  as PanelKey];
 
   const frame = currentFrame();
   const heap  = frame?.memory.heap ?? {};
@@ -202,6 +204,9 @@ export default function InspectorPanel() {
       ) : (
         <div className="flex-1" />
       )}
+
+      {/* Explain tutor (grounded LLM narration) */}
+      {showExplain && trace && <ExplainPanel />}
 
       {/* Error / warning explainer */}
       <ErrorExplainer />
