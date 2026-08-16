@@ -204,7 +204,9 @@ export default function InspectorPanel() {
           </div>
         </div>
       ) : (
-        <div className="flex-1" />
+        // Only pad with an empty spacer when no growing AI panel is present —
+        // otherwise the spacer steals the space the AI panel needs.
+        !showExplain && !showInterview && <div className="flex-1" />
       )}
 
       {/* Explain tutor (grounded LLM narration) */}

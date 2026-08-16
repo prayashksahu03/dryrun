@@ -25,7 +25,7 @@ export default function InterviewPanel() {
     !interviewLoading && history.length > 0 && history[history.length - 1].role === 'interviewer';
 
   return (
-    <div data-tour="interview-panel" className="flex-shrink-0 flex flex-col border-t border-zinc-800/60 max-h-[55%] overflow-hidden">
+    <div data-tour="interview-panel" className="flex-1 min-h-[240px] flex flex-col border-t border-zinc-800/60 overflow-hidden">
       <div className="px-3 py-2 flex items-center justify-between flex-shrink-0">
         <span className="text-[10px] text-zinc-600 uppercase tracking-widest font-mono flex items-center gap-1.5">
           <span className="text-emerald-400/70">◈</span> Interview
