@@ -2889,6 +2889,29 @@ class CppInterpreter:
                 for i, fv in enumerate(init_values):
                     if i < len(field_names):
                         self.memory.write_field(addr, field_names[i], fv, line)
+        else:
+            # Scalar/builtin new with an initializer — `new int(42)`,
+            # `new double(3.14)`, `new char('x')`, `new int{7}`. There's no ctor
+            # to run, so the value lives directly in the block's 'value' field;
+            # without this it stays at malloc's default (0) and *p reads 0.
+            init_val = None
+            for c in self._ch(cursor):
+                if c.kind == CK.INIT_LIST_EXPR:                 # new int{7}
+                    elems = [self._eval(a) for a in self._ch(c)]
+                    if elems:
+                        init_val = elems[0]
+                    break
+                if c.kind == CK.CALL_EXPR:                      # paren-init surfaced as a call
+                    inner = [self._eval(a) for a in self._ch(c)
+                             if a.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
+                    if inner:
+                        init_val = inner[0]
+                    break
+                if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF):
+                    init_val = self._eval(c)                    # new int(42)
+                    break
+            if init_val is not None:
+                self.memory.write_field(addr, 'value', init_val, line)
 
         self.memory.update_line(line)
         self._emit(line, f"new {base} → {addr}.",
