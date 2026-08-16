@@ -4,6 +4,7 @@ import { StepEvent } from '../types/trace';
 import CallTreePanel from './CallTreePanel';
 import ErrorExplainer from './ErrorExplainer';
 import ExplainPanel from './ExplainPanel';
+import InterviewPanel from './InterviewPanel';
 
 const CRASH_LABELS: Record<string, string> = {
   'null-deref':        'Null Pointer Dereference',
@@ -114,6 +115,7 @@ export default function InspectorPanel() {
   const showHeap     = panels['heap'     as PanelKey];
   const showEventLog = panels['eventLog' as PanelKey];
   const showExplain  = panels['explain'  as PanelKey];
+  const showInterview = panels['interview' as PanelKey];
 
   const frame = currentFrame();
   const heap  = frame?.memory.heap ?? {};
@@ -207,6 +209,9 @@ export default function InspectorPanel() {
 
       {/* Explain tutor (grounded LLM narration) */}
       {showExplain && trace && <ExplainPanel />}
+
+      {/* Interview mode (LLM interviewer) */}
+      {showInterview && trace && <InterviewPanel />}
 
       {/* Error / warning explainer */}
       <ErrorExplainer />

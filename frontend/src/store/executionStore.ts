@@ -122,15 +122,65 @@ async function postWalkthrough(trace: Trace, question?: string): Promise<Beat[]>
 
 export type Language = 'c' | 'cpp' | 'python';
 
-export type PanelKey = 'stack' | 'heap' | 'callTree' | 'eventLog' | 'explain';
+export type PanelKey = 'stack' | 'heap' | 'callTree' | 'eventLog' | 'explain' | 'interview';
 
 export const PANEL_LABELS: Record<PanelKey, string> = {
-  stack:    'Stack',
-  heap:     'Heap',
-  callTree: 'Call Tree',
-  eventLog: 'Event Log',
-  explain:  'Explain',
+  stack:     'Stack',
+  heap:      'Heap',
+  callTree:  'Call Tree',
+  eventLog:  'Event Log',
+  explain:   'Explain',
+  interview: 'Interview',
 };
+
+// A turn in the interview transcript.
+export interface InterviewTurn {
+  role: 'interviewer' | 'candidate';
+  content: string;
+}
+
+// Compact, grounded summary of what the code did — gives the interviewer real
+// behavior to probe and to check answers against.
+function buildInterviewSummary(trace: Trace): string {
+  const steps = trace.steps;
+  const parts: string[] = [];
+  const output = steps
+    .filter(s => s.event.type === 'output')
+    .map(s => (s.event as { type: 'output'; text: string }).text)
+    .join('');
+  if (output.trim()) parts.push(`Program output: ${JSON.stringify(output.trim())}`);
+
+  const algo = steps.map(s => s.execution?.algorithm).find(Boolean);
+  if (algo) parts.push(`Detected pattern: ${algo}`);
+  const g = steps.map(s => s.graph).find(Boolean);
+  if (g) parts.push(`Graph: ${g.nodes.length} nodes, ${g.edges.length} edges, ${g.directed ? 'directed' : 'undirected'}`);
+  const grid = steps.map(s => s.grid).find(Boolean);
+  if (grid) parts.push(`Grid: ${grid.rows}x${grid.cols}`);
+
+  const warns = new Set<string>();
+  for (const s of steps) {
+    if (s.event.type === 'warning' || s.event.type === 'crash') {
+      warns.add(`${s.event.type}: ${(s.event as { kind?: string; message?: string }).message ?? (s.event as { kind?: string }).kind ?? ''}`);
+    }
+  }
+  if (warns.size) parts.push(`Runtime notes: ${[...warns].slice(0, 4).join('; ')}`);
+  parts.push(`Executed in ${steps.length} trace steps.`);
+  return parts.join('\n');
+}
+
+async function postInterview(trace: Trace, history: InterviewTurn[]): Promise<string> {
+  const res = await fetch(`${BACKEND}/interview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source: trace.source, summary: buildInterviewSummary(trace), history }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: `Server error ${res.status}` }));
+    throw new Error(err.detail ?? `Server error ${res.status}`);
+  }
+  const data = await res.json();
+  return data.message as string;
+}
 
 interface ExecutionStore {
   trace: Trace | null;
@@ -172,6 +222,14 @@ interface ExecutionStore {
   prevBeat: () => void;
   exitWalkthrough: () => void;
 
+  // Interview mode: LLM interviewer asks about the candidate's code, one Q at a time
+  interview: { history: InterviewTurn[] } | null;
+  interviewLoading: boolean;
+  interviewError: string | null;
+  startInterview: () => Promise<void>;
+  answerInterview: (answer: string) => Promise<void>;
+  endInterview: () => void;
+
   currentFrame: () => TraceStep | null;
   prevFrame: () => TraceStep | null;
 
@@ -209,7 +267,7 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
   error: null,
   demoIndex: 0,
   language: 'cpp' as Language,
-  panels: { stack: true, heap: true, callTree: true, eventLog: true, explain: true },
+  panels: { stack: true, heap: true, callTree: true, eventLog: true, explain: true, interview: false },
   activeGuidedProgram: null,
   ambiguities: [],
   vizHints: {},
@@ -224,6 +282,10 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
   walkthrough: null,
   walkLoading: false,
   walkError: null,
+
+  interview: null,
+  interviewLoading: false,
+  interviewError: null,
 
   currentFrame: () => {
     const { trace, currentStep } = get();
@@ -286,6 +348,7 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
   setEditorSource: (src) => set({
     editorSource: src, error: null, activeGuidedProgram: null,
     walkthrough: null, walkError: null, currentExplanation: null, qa: null,
+    interview: null, interviewError: null,
   }),
   setStdinInput: (input) => set({ stdinInput: input }),
   setLanguage: (lang) => set({ language: lang, error: null }),
@@ -357,6 +420,7 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
         // the OLD trace's step indices, so they must be cleared, not carried over.
         walkthrough: null, walkLoading: false, walkError: null,
         explanationCache: {}, currentExplanation: null, qa: null, explainError: null,
+        interview: null, interviewLoading: false, interviewError: null,
       });
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -465,4 +529,36 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
   },
 
   exitWalkthrough: () => set({ walkthrough: null }),
+
+  // Interview: the LLM interviewer opens with a question about the candidate's code.
+  startInterview: async () => {
+    const { trace } = get();
+    if (!trace) return;
+    set({ interviewLoading: true, interviewError: null, interview: { history: [] } });
+    try {
+      const msg = await postInterview(trace, []);
+      set({ interviewLoading: false, interview: { history: [{ role: 'interviewer', content: msg }] } });
+    } catch (e) {
+      set({ interviewLoading: false, interview: null, interviewError: e instanceof Error ? e.message : String(e) });
+    }
+  },
+
+  // Candidate answers → interviewer gives feedback + the next question.
+  answerInterview: async (answer) => {
+    const { trace, interview } = get();
+    if (!trace || !interview || !answer.trim()) return;
+    const history: InterviewTurn[] = [...interview.history, { role: 'candidate', content: answer.trim() }];
+    set({ interviewLoading: true, interviewError: null, interview: { history } });
+    try {
+      const msg = await postInterview(trace, history);
+      set({
+        interviewLoading: false,
+        interview: { history: [...history, { role: 'interviewer', content: msg }] },
+      });
+    } catch (e) {
+      set({ interviewLoading: false, interviewError: e instanceof Error ? e.message : String(e) });
+    }
+  },
+
+  endInterview: () => set({ interview: null, interviewError: null }),
 }));

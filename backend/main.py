@@ -531,6 +531,76 @@ async def walkthrough(req: WalkthroughRequest):
     return WalkthroughResponse(beats=beats, cached=False, model=EXPLAIN_MODEL)
 
 
+# ── Interview mode (LLM interviewer) ──────────────────────────────────────────
+# The LLM plays a technical interviewer, questioning the candidate about the code
+# they wrote — one question at a time, grounded in the actual code + a trace
+# summary so it can probe correctness/complexity/edge-cases and check answers
+# against what the code really does. Stateless: the frontend holds the transcript.
+INTERVIEW_SYSTEM = (
+    "You are a technical interviewer conducting a coding interview. The candidate wrote the code "
+    "below (for a problem they were given). Interview them about THEIR code.\n"
+    "Rules:\n"
+    "- Ask ONE question at a time — never a list. No markdown bullet points.\n"
+    "- Base every question on their ACTUAL code: design choices, correctness, edge cases, time/space "
+    "complexity, 'what happens if <input/scenario>', or trace through a specific part.\n"
+    "- After the candidate answers, give ONE short sentence of feedback (correct / partially right / "
+    "off — and why briefly), THEN ask the next question. Go progressively deeper and follow up on "
+    "weak or vague answers.\n"
+    "- Ground your feedback in the code + trace summary; don't claim behavior the code doesn't show.\n"
+    "- Be encouraging but rigorous. Don't hand over the answer unless the candidate is clearly stuck "
+    "(then give a small hint). Keep each turn to 2-4 sentences."
+)
+
+
+class InterviewTurn(BaseModel):
+    role: str            # 'interviewer' | 'candidate'
+    content: str
+
+
+class InterviewRequest(BaseModel):
+    source: str
+    summary: str = ''    # compact trace summary (output, algorithm, warnings) — optional grounding
+    history: List[InterviewTurn] = []
+
+
+class InterviewResponse(BaseModel):
+    message: str
+    model: str
+
+
+@app.post("/interview", response_model=InterviewResponse)
+async def interview(req: InterviewRequest):
+    if len(req.source) > 12000:
+        raise HTTPException(status_code=400, detail="Source code too long (max 12000 chars).")
+    client = _get_explain_client()
+    if client is None:
+        raise HTTPException(status_code=503, detail="Interview is unavailable — the LLM client isn't installed.")
+
+    context = "Candidate's code:\n```cpp\n" + req.source + "\n```"
+    if req.summary:
+        context += "\n\nWhat the interpreter observed when running it:\n" + req.summary
+    messages = [{"role": "system", "content": INTERVIEW_SYSTEM + "\n\n" + context}]
+
+    if not req.history:
+        messages.append({"role": "user", "content":
+                         "Begin the interview: in one sentence say what my code appears to do, "
+                         "then ask your first question."})
+    else:
+        for t in req.history[-16:]:  # bound context; recent turns are what matters
+            role = "assistant" if t.role == "interviewer" else "user"
+            messages.append({"role": role, "content": t.content})
+
+    try:
+        resp = client.chat.completions.create(
+            model=EXPLAIN_MODEL, max_tokens=350, temperature=0.5, messages=messages)
+        text = (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        raise _llm_http_error(e)
+    if not text:
+        raise HTTPException(status_code=502, detail="Interviewer returned an empty reply. Try again.")
+    return InterviewResponse(message=text, model=EXPLAIN_MODEL)
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
