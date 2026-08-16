@@ -357,6 +357,7 @@ class WalkthroughRequest(BaseModel):
     digest: List[WalkStep] = []      # compacted whole-trace step list (no memory)
     notable: List[WalkStep] = []     # crashes / warnings / end
     total_steps: int = 0
+    question: Optional[str] = None    # if set: build a walkthrough TARGETED at this doubt
 
 
 class Beat(BaseModel):
@@ -419,7 +420,16 @@ def _build_walk_facts(req: WalkthroughRequest) -> str:
     if req.notable:
         lines = [f"#{s.index} line {s.line}: {s.description}" for s in req.notable]
         parts.append("Notable events (warnings / crashes / end):\n" + "\n".join(lines))
-    parts.append("Pick the 4-8 most instructive beats and return the JSON array.")
+    if req.question:
+        parts.append(
+            f"The student's specific doubt: \"{req.question}\"\n"
+            "Build a FOCUSED walkthrough that resolves THIS doubt: choose the 3-6 steps where the "
+            "relevant code executes (the exact lines / loop iterations the doubt is about), in the "
+            "order that best explains it. Each narration must directly address the doubt using the "
+            "real values at that step. If the doubt is about a specific line or variable, center the "
+            "beats on where that line runs / that variable changes. Return the JSON object.")
+    else:
+        parts.append("Pick the 4-8 most instructive beats and return the JSON object.")
     return "\n\n".join(parts)
 
 
@@ -481,7 +491,8 @@ def _run_walkthrough(req: WalkthroughRequest) -> list:
 async def walkthrough(req: WalkthroughRequest):
     if len(req.source) > 12000:
         raise HTTPException(status_code=400, detail="Source code too long (max 12000 chars).")
-    key = hashlib.sha256(req.source.encode('utf-8', 'ignore')).hexdigest()[:16]
+    key_src = req.source + "\x00" + (req.question or "")
+    key = hashlib.sha256(key_src.encode('utf-8', 'ignore')).hexdigest()[:16]
     if key in _WALK_CACHE:
         _WALK_CACHE.move_to_end(key)
         return WalkthroughResponse(beats=_WALK_CACHE[key], cached=True, model=EXPLAIN_MODEL)

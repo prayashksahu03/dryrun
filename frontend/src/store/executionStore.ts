@@ -79,7 +79,7 @@ export interface Beat {
 // walkthrough (the LLM picks the key step indices + narration). Large traces are
 // sampled so the payload/latency stay bounded; the returned step indices are
 // still real, so goToStep() can drive the animation to each beat.
-async function postWalkthrough(trace: Trace): Promise<Beat[]> {
+async function postWalkthrough(trace: Trace, question?: string): Promise<Beat[]> {
   const steps = trace.steps;
   const map = (s: TraceStep) => ({
     index: s.index, line: s.line, description: s.description, event: s.event,
@@ -107,7 +107,10 @@ async function postWalkthrough(trace: Trace): Promise<Beat[]> {
   const res = await fetch(`${BACKEND}/walkthrough`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ source: trace.source, digest, notable, total_steps: steps.length }),
+    body: JSON.stringify({
+      source: trace.source, digest, notable, total_steps: steps.length,
+      question: question ?? null,
+    }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: `Server error ${res.status}` }));
@@ -159,11 +162,12 @@ interface ExecutionStore {
   explainStep: (step: number) => Promise<void>;
   askQuestion: (q: string) => Promise<void>;
 
-  // Tutor walkthrough: LLM-chosen beats that drive the animation + code highlight
-  walkthrough: { beats: Beat[]; idx: number } | null;
+  // Tutor walkthrough: LLM-chosen beats that drive the animation + code highlight.
+  // `question` is set when the walkthrough is scoped to a specific student doubt.
+  walkthrough: { beats: Beat[]; idx: number; question: string | null } | null;
   walkLoading: boolean;
   walkError: string | null;
-  startWalkthrough: () => Promise<void>;
+  startWalkthrough: (question?: string) => Promise<void>;
   nextBeat: () => void;
   prevBeat: () => void;
   exitWalkthrough: () => void;
@@ -279,7 +283,10 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
   reset:    () => set({ currentStep: 0, isPlaying: false }),
   setSpeed: (speed) => set({ playbackSpeed: speed }),
 
-  setEditorSource: (src) => set({ editorSource: src, error: null, activeGuidedProgram: null }),
+  setEditorSource: (src) => set({
+    editorSource: src, error: null, activeGuidedProgram: null,
+    walkthrough: null, walkError: null, currentExplanation: null, qa: null,
+  }),
   setStdinInput: (input) => set({ stdinInput: input }),
   setLanguage: (lang) => set({ language: lang, error: null }),
   togglePanel: (panel) => set(s => ({ panels: { ...s.panels, [panel]: !s.panels[panel] } })),
@@ -344,7 +351,13 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
         steps: data.trace,
       };
       const ambiguities = detectAmbiguities(trace);
-      set({ trace, currentStep: 0, isPlaying: false, isLoading: false, error: null, ambiguities, vizHints: {} });
+      set({
+        trace, currentStep: 0, isPlaying: false, isLoading: false, error: null, ambiguities, vizHints: {},
+        // A new program invalidates every explanation/walkthrough — beats point at
+        // the OLD trace's step indices, so they must be cleared, not carried over.
+        walkthrough: null, walkLoading: false, walkError: null,
+        explanationCache: {}, currentExplanation: null, qa: null, explainError: null,
+      });
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       set({
@@ -421,13 +434,14 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
   },
 
   // Guided tour: ask the LLM for beats, then drive the animation to the first.
-  startWalkthrough: async () => {
+  // With a `question`, the beats are scoped to that specific doubt (agentic tutor).
+  startWalkthrough: async (question?: string) => {
     const { trace } = get();
     if (!trace) return;
     set({ walkLoading: true, walkError: null, walkthrough: null });
     try {
-      const beats = await postWalkthrough(trace);
-      set({ walkLoading: false, walkthrough: { beats, idx: 0 } });
+      const beats = await postWalkthrough(trace, question);
+      set({ walkLoading: false, walkthrough: { beats, idx: 0, question: question ?? null } });
       get().goToStep(beats[0].step);
     } catch (e) {
       set({ walkLoading: false, walkError: e instanceof Error ? e.message : String(e) });
