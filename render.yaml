@@ -1,0 +1,17 @@
+# Render blueprint — deploys the DryRun backend (FastAPI + interpreter + tutor).
+# Frontend goes on Vercel/Netlify separately (see DEPLOY.md).
+services:
+  - type: web
+    name: dryrun-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: EXPLAIN_BASE_URL
+        value: https://api.groq.com/openai/v1
+      - key: EXPLAIN_MODEL
+        value: llama-3.3-70b-versatile
+      - key: EXPLAIN_API_KEY
+        sync: false          # secret — set this in the Render dashboard, not in git

@@ -163,6 +163,9 @@ def _llm_http_error(e: Exception) -> HTTPException:
     hard-import the SDK's exception classes."""
     name = type(e).__name__
     status = getattr(e, 'status_code', None) or getattr(e, 'status', None)
+    # Log the real cause so failures are never invisible (handled exceptions
+    # otherwise produce no traceback in the uvicorn log).
+    print(f"[tutor] LLM call failed → {name} (status={status}): {str(e)[:300]}", flush=True)
     if 'RateLimit' in name or status == 429:
         return HTTPException(
             status_code=429,
