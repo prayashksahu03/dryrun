@@ -12,7 +12,7 @@ import PanelToggleBar from './components/PanelToggleBar';
 import LearnPanel from './components/LearnPanel';
 import TourOverlay, { TOUR_STEPS } from './components/TourOverlay';
 import AmbiguityPanel from './components/AmbiguityPanel';
-import AiLeftPane from './components/AiLeftPane';
+import ArtifactPanel from './components/ArtifactPanel';
 import TutorConversation from './components/TutorConversation';
 import InterviewConversation from './components/InterviewConversation';
 
@@ -85,7 +85,7 @@ export default function App() {
   // Column widths (as percentages of the container)
   const [codePct, setCodePct]           = useState(34);
   const [inspectorPct, setInspectorPct] = useState(22);
-  const [aiLeftPct, setAiLeftPct]       = useState(55);  // left (code+animation) share in AI modes
+  const [aiLeftPct, setAiLeftPct]       = useState(48);  // left share in AI modes (chat / code)
   const containerRef = useRef<HTMLDivElement>(null);
 
   const totalWidth = () => containerRef.current?.getBoundingClientRect().width ?? 1;
@@ -191,19 +191,35 @@ export default function App() {
           </>
         )}
 
-        {(appMode === 'tutor' || appMode === 'interview') && (
+        {/* Tutor: conversation is the hero (left); the live artifact (Animation |
+            Code tabs) is on the right. */}
+        {appMode === 'tutor' && (
           <>
-            {/* Left: code (read-only, line-highlighted) over the animation */}
             <div style={{ width: `${aiLeftPct}%` }} className="flex-shrink-0 flex flex-col overflow-hidden">
-              <AiLeftPane />
+              <TutorConversation />
             </div>
             <ColDivider onDrag={dx => {
               const delta = (dx / totalWidth()) * 100;
-              setAiLeftPct(p => Math.min(Math.max(p + delta, 35), 75));
+              setAiLeftPct(p => Math.min(Math.max(p + delta, 30), 65));
             }} />
-            {/* Right: the full conversation */}
             <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-              {appMode === 'tutor' ? <TutorConversation /> : <InterviewConversation />}
+              <ArtifactPanel />
+            </div>
+          </>
+        )}
+
+        {/* Interview: no animation — just the code and the interview chat. */}
+        {appMode === 'interview' && (
+          <>
+            <div style={{ width: `${aiLeftPct}%` }} className="flex-shrink-0 flex flex-col overflow-hidden">
+              <CodePanel readOnly />
+            </div>
+            <ColDivider onDrag={dx => {
+              const delta = (dx / totalWidth()) * 100;
+              setAiLeftPct(p => Math.min(Math.max(p + delta, 30), 65));
+            }} />
+            <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+              <InterviewConversation />
             </div>
           </>
         )}
