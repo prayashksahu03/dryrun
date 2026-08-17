@@ -48,10 +48,10 @@ export const TOUR_STEPS: TourStep[] = [
     placement: 'left',
   },
   {
-    target: '[data-tour="explain-panel"]',
-    title: 'AI Tutor',
-    body: 'Stuck? Ask the tutor. It explains any step from the real trace values — never guessed. Or describe what confuses you and it builds a guided slideshow that drives the animation + code through exactly the steps that answer your doubt.',
-    placement: 'left',
+    target: '[data-tour="mode-switch"]',
+    title: 'Debug · Tutor · Interview',
+    body: 'Switch modes here. Debug is this memory view. Tutor gives you an AI that explains any step and walks you through the code (grounded in the real trace). Interview runs a mock interviewer that quizzes you on the code you wrote.',
+    placement: 'bottom',
   },
   {
     target: '[data-tour="learn-button"]',

@@ -122,16 +122,29 @@ async function postWalkthrough(trace: Trace, question?: string): Promise<Beat[]>
 
 export type Language = 'c' | 'cpp' | 'python';
 
-export type PanelKey = 'stack' | 'heap' | 'callTree' | 'eventLog' | 'explain' | 'interview';
+// Top-level view. Debug = memory/animation; Tutor = AI explainer; Interview = mock interviewer.
+export type AppMode = 'debug' | 'tutor' | 'interview';
+
+// Views bar now governs ONLY the memory panels — the AI features are top-level modes.
+export type PanelKey = 'stack' | 'heap' | 'callTree' | 'eventLog';
 
 export const PANEL_LABELS: Record<PanelKey, string> = {
   stack:     'Stack',
   heap:      'Heap',
   callTree:  'Call Tree',
   eventLog:  'Event Log',
-  explain:   'Explain',
-  interview: 'Interview',
 };
+
+// One message in the Tutor conversation. A message with a `step` is clickable and
+// drives the animation (goToStep) — walkthrough beats and per-step explains carry one.
+export interface TutorMsg {
+  id: number;
+  role: 'you' | 'tutor';
+  text: string;
+  step?: number;
+}
+let _tutorMsgId = 0;
+const nextTutorMsgId = () => ++_tutorMsgId;
 
 // A turn in the interview transcript.
 export interface InterviewTurn {
@@ -197,30 +210,27 @@ interface ExecutionStore {
 
   panels: Record<PanelKey, boolean>;
 
+  // Top-level mode: which experience fills the main area.
+  appMode: AppMode;
+  setAppMode: (mode: AppMode) => void;
+
   activeGuidedProgram: GuidedProgram | null;
 
   ambiguities: Ambiguity[];
   vizHints: Record<string, VizHint>;
   setVizHints: (hints: Record<string, VizHint>) => void;
 
-  // Explain tutor (grounded LLM narration — never in the execution path)
+  // Tutor (grounded LLM narration). One running conversation: per-step explains,
+  // free-text Q&A, and walkthrough beats all land in `tutorTranscript` as messages.
+  tutorTranscript: TutorMsg[];
   explanationCache: Record<string, string>;
   explainLoading: boolean;
   explainError: string | null;
-  currentExplanation: string | null;
-  qa: { q: string; a: string } | null;
-  explainStep: (step: number) => Promise<void>;
-  askQuestion: (q: string) => Promise<void>;
-
-  // Tutor walkthrough: LLM-chosen beats that drive the animation + code highlight.
-  // `question` is set when the walkthrough is scoped to a specific student doubt.
-  walkthrough: { beats: Beat[]; idx: number; question: string | null } | null;
   walkLoading: boolean;
   walkError: string | null;
+  explainStep: (step: number) => Promise<void>;
+  askQuestion: (q: string) => Promise<void>;
   startWalkthrough: (question?: string) => Promise<void>;
-  nextBeat: () => void;
-  prevBeat: () => void;
-  exitWalkthrough: () => void;
 
   // Interview mode: LLM interviewer asks about the candidate's code, one Q at a time
   interview: { history: InterviewTurn[] } | null;
@@ -267,19 +277,18 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
   error: null,
   demoIndex: 0,
   language: 'cpp' as Language,
-  panels: { stack: true, heap: true, callTree: true, eventLog: true, explain: true, interview: false },
+  panels: { stack: true, heap: true, callTree: true, eventLog: true },
+  appMode: 'debug',
+  setAppMode: (mode) => set({ appMode: mode }),
   activeGuidedProgram: null,
   ambiguities: [],
   vizHints: {},
   setVizHints: (hints) => set({ vizHints: hints }),
 
+  tutorTranscript: [],
   explanationCache: {},
   explainLoading: false,
   explainError: null,
-  currentExplanation: null,
-  qa: null,
-
-  walkthrough: null,
   walkLoading: false,
   walkError: null,
 
@@ -347,7 +356,7 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
 
   setEditorSource: (src) => set({
     editorSource: src, error: null, activeGuidedProgram: null,
-    walkthrough: null, walkError: null, currentExplanation: null, qa: null,
+    tutorTranscript: [], walkError: null, explainError: null,
     interview: null, interviewError: null,
   }),
   setStdinInput: (input) => set({ stdinInput: input }),
@@ -416,10 +425,10 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
       const ambiguities = detectAmbiguities(trace);
       set({
         trace, currentStep: 0, isPlaying: false, isLoading: false, error: null, ambiguities, vizHints: {},
-        // A new program invalidates every explanation/walkthrough — beats point at
-        // the OLD trace's step indices, so they must be cleared, not carried over.
-        walkthrough: null, walkLoading: false, walkError: null,
-        explanationCache: {}, currentExplanation: null, qa: null, explainError: null,
+        // A new program invalidates every explanation/walkthrough — messages point
+        // at the OLD trace's step indices, so they must be cleared, not carried over.
+        tutorTranscript: [], walkLoading: false, walkError: null,
+        explanationCache: {}, explainLoading: false, explainError: null,
         interview: null, interviewLoading: false, interviewError: null,
       });
     } catch (e: unknown) {
@@ -451,84 +460,75 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
     }
   },
 
-  // On-demand only (button click), never auto-per-step. Local cache first, so
-  // re-explaining a step is instant and costs nothing.
+  // Append a grounded explanation of `step` to the tutor conversation. Cached so
+  // re-explaining a step never re-calls the LLM. The message carries `step`, so
+  // clicking it later re-drives the animation there.
   explainStep: async (step) => {
     const { trace } = get();
     if (!trace) return;
     const key = `${step}:step:`;
     const cached = get().explanationCache[key];
     if (cached) {
-      set({ currentExplanation: cached, explainError: null, explainLoading: false });
-      return;
-    }
-    set({ explainLoading: true, explainError: null, currentExplanation: null });
-    try {
-      const text = await postExplain(trace, step, 'step');
       set(s => ({
-        currentExplanation: text,
-        explainLoading: false,
-        explanationCache: { ...s.explanationCache, [key]: text },
+        explainError: null,
+        tutorTranscript: [...s.tutorTranscript, { id: nextTutorMsgId(), role: 'tutor', text: cached, step }],
       }));
-    } catch (e) {
-      set({ explainLoading: false, explainError: e instanceof Error ? e.message : String(e) });
-    }
-  },
-
-  askQuestion: async (q) => {
-    const { trace, currentStep } = get();
-    if (!trace || !q.trim()) return;
-    const key = `${currentStep}:question:${q}`;
-    const cached = get().explanationCache[key];
-    if (cached) {
-      set({ qa: { q, a: cached }, explainError: null, explainLoading: false });
       return;
     }
     set({ explainLoading: true, explainError: null });
     try {
-      const text = await postExplain(trace, currentStep, 'question', q);
+      const text = await postExplain(trace, step, 'step');
       set(s => ({
-        qa: { q, a: text },
         explainLoading: false,
         explanationCache: { ...s.explanationCache, [key]: text },
+        tutorTranscript: [...s.tutorTranscript, { id: nextTutorMsgId(), role: 'tutor', text, step }],
       }));
     } catch (e) {
       set({ explainLoading: false, explainError: e instanceof Error ? e.message : String(e) });
     }
   },
 
-  // Guided tour: ask the LLM for beats, then drive the animation to the first.
-  // With a `question`, the beats are scoped to that specific doubt (agentic tutor).
+  // Free-text Q&A about the program, grounded in the trace. Appends your question,
+  // then the tutor's answer.
+  askQuestion: async (q) => {
+    const { trace, currentStep } = get();
+    if (!trace || !q.trim()) return;
+    set(s => ({
+      explainLoading: true, explainError: null,
+      tutorTranscript: [...s.tutorTranscript, { id: nextTutorMsgId(), role: 'you', text: q.trim() }],
+    }));
+    try {
+      const text = await postExplain(trace, currentStep, 'question', q.trim());
+      set(s => ({
+        explainLoading: false,
+        tutorTranscript: [...s.tutorTranscript, { id: nextTutorMsgId(), role: 'tutor', text }],
+      }));
+    } catch (e) {
+      set({ explainLoading: false, explainError: e instanceof Error ? e.message : String(e) });
+    }
+  },
+
+  // Guided tour: the LLM picks key steps ("beats"); each becomes a clickable tutor
+  // message that drives the animation. With a `question`, the beats are scoped to it.
   startWalkthrough: async (question?: string) => {
     const { trace } = get();
     if (!trace) return;
-    set({ walkLoading: true, walkError: null, walkthrough: null });
+    const q = question?.trim();
+    if (q) {
+      set(s => ({ tutorTranscript: [...s.tutorTranscript, { id: nextTutorMsgId(), role: 'you', text: q }] }));
+    }
+    set({ walkLoading: true, walkError: null });
     try {
-      const beats = await postWalkthrough(trace, question);
-      set({ walkLoading: false, walkthrough: { beats, idx: 0, question: question ?? null } });
-      get().goToStep(beats[0].step);
+      const beats = await postWalkthrough(trace, q || undefined);
+      const msgs: TutorMsg[] = beats.map(b => ({
+        id: nextTutorMsgId(), role: 'tutor', text: `${b.title} — ${b.narration}`, step: b.step,
+      }));
+      set(s => ({ walkLoading: false, tutorTranscript: [...s.tutorTranscript, ...msgs] }));
+      if (beats.length) get().goToStep(beats[0].step);
     } catch (e) {
       set({ walkLoading: false, walkError: e instanceof Error ? e.message : String(e) });
     }
   },
-
-  nextBeat: () => {
-    const w = get().walkthrough;
-    if (!w) return;
-    const idx = Math.min(w.idx + 1, w.beats.length - 1);
-    set({ walkthrough: { ...w, idx } });
-    get().goToStep(w.beats[idx].step);
-  },
-
-  prevBeat: () => {
-    const w = get().walkthrough;
-    if (!w) return;
-    const idx = Math.max(w.idx - 1, 0);
-    set({ walkthrough: { ...w, idx } });
-    get().goToStep(w.beats[idx].step);
-  },
-
-  exitWalkthrough: () => set({ walkthrough: null }),
 
   // Interview: the LLM interviewer opens with a question about the candidate's code.
   startInterview: async () => {

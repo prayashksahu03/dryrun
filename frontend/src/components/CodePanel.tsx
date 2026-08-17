@@ -93,7 +93,7 @@ int main() {
 
 // ── Code panel (always editable, overlays trace highlight when active) ──
 
-function EditorMode() {
+function EditorMode({ readOnly = false }: { readOnly?: boolean }) {
   const {
     editorSource, setEditorSource, stdinInput, setStdinInput,
     runCode, isLoading, error, language,
@@ -166,7 +166,8 @@ function EditorMode() {
         </div>
         <div />
         <div className="flex items-center gap-2">
-          {trace && (
+          {readOnly && <span className="text-[10px] font-mono text-zinc-600">read-only · following</span>}
+          {!readOnly && trace && (
             <button
               onClick={handleReport}
               disabled={reported}
@@ -180,7 +181,7 @@ function EditorMode() {
               {reported ? '✓ reported, thanks' : '⚑ looks wrong?'}
             </button>
           )}
-          <button
+          {!readOnly && <button
             data-tour="run-button"
             onClick={handleRun}
             disabled={isLoading}
@@ -199,7 +200,7 @@ function EditorMode() {
             ) : (
               <>▶ Run</>
             )}
-          </button>
+          </button>}
         </div>
       </div>
 
@@ -264,8 +265,9 @@ function EditorMode() {
         <textarea
           ref={textareaRef}
           value={editorSource}
-          onChange={e => { clearTrace(); setEditorSource(e.target.value); }}
-          onKeyDown={handleKeyDown}
+          readOnly={readOnly}
+          onChange={e => { if (readOnly) return; clearTrace(); setEditorSource(e.target.value); }}
+          onKeyDown={readOnly ? undefined : handleKeyDown}
           onScroll={() => {
             if (gutterRef.current && textareaRef.current) {
               gutterRef.current.scrollTop = textareaRef.current.scrollTop;
@@ -286,7 +288,7 @@ function EditorMode() {
       </div>
 
       {/* stdin panel */}
-      {language === 'cpp' && (
+      {!readOnly && language === 'cpp' && (
         <div className="border-t border-zinc-800/60 flex-shrink-0">
           <button
             onClick={() => setStdinOpen(o => !o)}
@@ -361,6 +363,6 @@ function EditorMode() {
   );
 }
 
-export default function CodePanel() {
-  return <EditorMode />;
+export default function CodePanel({ readOnly = false }: { readOnly?: boolean } = {}) {
+  return <EditorMode readOnly={readOnly} />;
 }

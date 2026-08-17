@@ -5,14 +5,12 @@ const PANEL_ICONS: Record<PanelKey, string> = {
   heap:      '◉',
   callTree:  '⌥',
   eventLog:  '≈',
-  explain:   '✦',
-  interview: '◈',
 };
 
 // Detect which panels have content in the current trace
-function usePanelRelevance() {
+function usePanelRelevance(): Record<PanelKey, boolean> {
   const { trace, currentStep } = useExecutionStore();
-  if (!trace) return { stack: true, heap: false, callTree: false, eventLog: true, explain: false, interview: false };
+  if (!trace) return { stack: true, heap: false, callTree: false, eventLog: true };
 
   const steps = trace.steps.slice(0, currentStep + 1);
   const frame = trace.steps[currentStep];
@@ -22,14 +20,14 @@ function usePanelRelevance() {
     !(s.event as { type: 'call'; function: string }).function.startsWith('<lambda'));
   const hasStack    = frame ? frame.memory.stack.length > 0 : true;
 
-  return { stack: hasStack, heap: hasHeap, callTree: hasCallTree, eventLog: true, explain: !!trace, interview: !!trace };
+  return { stack: hasStack, heap: hasHeap, callTree: hasCallTree, eventLog: true };
 }
 
 export default function PanelToggleBar() {
   const { panels, togglePanel } = useExecutionStore();
   const relevance = usePanelRelevance();
 
-  const keys: PanelKey[] = ['stack', 'heap', 'callTree', 'eventLog', 'explain', 'interview'];
+  const keys: PanelKey[] = ['stack', 'heap', 'callTree', 'eventLog'];
 
   return (
     <div className="flex items-center justify-center gap-1 h-8 border-b border-zinc-800/60 bg-[#09090b]/80 flex-shrink-0 px-4">

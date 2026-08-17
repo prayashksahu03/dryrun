@@ -10,6 +10,10 @@ import PanelToggleBar from './components/PanelToggleBar';
 import LearnPanel from './components/LearnPanel';
 import TourOverlay, { TOUR_STEPS } from './components/TourOverlay';
 import AmbiguityPanel from './components/AmbiguityPanel';
+import AiLeftPane from './components/AiLeftPane';
+import TutorConversation from './components/TutorConversation';
+import InterviewConversation from './components/InterviewConversation';
+import type { AppMode } from './store/executionStore';
 
 // ── Column drag handle ────────────────────────────────────────────────────
 
@@ -60,7 +64,7 @@ function ColDivider({ onDrag }: { onDrag: (dx: number) => void }) {
 // ── App ───────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const { isPlaying, stepForward, trace, currentStep, playbackSpeed, currentFrame, activeGuidedProgram } = useExecutionStore();
+  const { isPlaying, stepForward, trace, currentStep, playbackSpeed, currentFrame, activeGuidedProgram, appMode, setAppMode } = useExecutionStore();
   useKeyboardNav();
 
   const frame = currentFrame();
@@ -79,6 +83,7 @@ export default function App() {
   // Column widths (as percentages of the container)
   const [codePct, setCodePct]           = useState(34);
   const [inspectorPct, setInspectorPct] = useState(22);
+  const [aiLeftPct, setAiLeftPct]       = useState(55);  // left (code+animation) share in AI modes
   const containerRef = useRef<HTMLDivElement>(null);
 
   const totalWidth = () => containerRef.current?.getBoundingClientRect().width ?? 1;
@@ -107,6 +112,28 @@ export default function App() {
           )}
         </div>
         <div className="flex items-center gap-3">
+          {/* Mode switch */}
+          <div data-tour="mode-switch" className="flex items-center rounded-md border border-zinc-700/60 overflow-hidden">
+            {(['debug', 'tutor', 'interview'] as AppMode[]).map(m => {
+              const on = appMode === m;
+              const disabled = m !== 'debug' && !trace;
+              return (
+                <button
+                  key={m}
+                  onClick={() => { if (!disabled) setAppMode(m); }}
+                  disabled={disabled}
+                  title={disabled ? 'Run a program first' : `${m} mode`}
+                  className={[
+                    'h-7 px-2.5 text-[11px] font-mono capitalize transition-colors',
+                    on ? 'bg-violet-500/25 text-violet-200' : 'text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800',
+                    disabled ? 'opacity-40 cursor-not-allowed' : '',
+                  ].join(' ')}
+                >
+                  {m}
+                </button>
+              );
+            })}
+          </div>
           {isCrash && (() => {
             const ev = frame?.event as { type: 'crash'; kind: string } | undefined;
             const LABELS: Record<string, string> = {
@@ -173,41 +200,51 @@ export default function App() {
         />
       )}
 
-      <PanelToggleBar />
+      {/* Views bar governs the memory panels — Debug mode only */}
+      {appMode === 'debug' && <PanelToggleBar />}
 
-      {/* Main — three resizable columns */}
+      {/* Main area — swaps by mode */}
       <div ref={containerRef} className="flex flex-1 overflow-hidden">
 
-        {/* Code panel */}
-        <div
-          style={{ width: `${codePct}%` }}
-          className="flex-shrink-0 flex flex-col overflow-hidden"
-        >
-          <CodePanel />
-        </div>
+        {appMode === 'debug' && (
+          <>
+            {/* Code panel */}
+            <div style={{ width: `${codePct}%` }} className="flex-shrink-0 flex flex-col overflow-hidden">
+              <CodePanel />
+            </div>
+            <ColDivider onDrag={dx => {
+              const delta = (dx / totalWidth()) * 100;
+              setCodePct(p => Math.min(Math.max(p + delta, 15), 55));
+            }} />
+            {/* Memory canvas — flex-1 fills remaining space */}
+            <MemoryCanvas />
+            <ColDivider onDrag={dx => {
+              const delta = (dx / totalWidth()) * 100;
+              setInspectorPct(p => Math.min(Math.max(p - delta, 12), 45));
+            }} />
+            {/* Inspector panel */}
+            <div style={{ width: `${inspectorPct}%` }} className="flex-shrink-0 flex flex-col overflow-hidden">
+              <InspectorPanel />
+            </div>
+          </>
+        )}
 
-        {/* Drag handle: code | canvas */}
-        <ColDivider onDrag={dx => {
-          const delta = (dx / totalWidth()) * 100;
-          setCodePct(p => Math.min(Math.max(p + delta, 15), 55));
-        }} />
-
-        {/* Memory canvas — flex-1 fills remaining space */}
-        <MemoryCanvas />
-
-        {/* Drag handle: canvas | inspector */}
-        <ColDivider onDrag={dx => {
-          const delta = (dx / totalWidth()) * 100;
-          setInspectorPct(p => Math.min(Math.max(p - delta, 12), 45));
-        }} />
-
-        {/* Inspector panel */}
-        <div
-          style={{ width: `${inspectorPct}%` }}
-          className="flex-shrink-0 flex flex-col overflow-hidden"
-        >
-          <InspectorPanel />
-        </div>
+        {(appMode === 'tutor' || appMode === 'interview') && (
+          <>
+            {/* Left: code (read-only, line-highlighted) over the animation */}
+            <div style={{ width: `${aiLeftPct}%` }} className="flex-shrink-0 flex flex-col overflow-hidden">
+              <AiLeftPane />
+            </div>
+            <ColDivider onDrag={dx => {
+              const delta = (dx / totalWidth()) * 100;
+              setAiLeftPct(p => Math.min(Math.max(p + delta, 35), 75));
+            }} />
+            {/* Right: the full conversation */}
+            <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+              {appMode === 'tutor' ? <TutorConversation /> : <InterviewConversation />}
+            </div>
+          </>
+        )}
 
       </div>
 
