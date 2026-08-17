@@ -134,7 +134,7 @@ async def report(req: ReportRequest):
 # OpenAI-compatible endpoint; defaults to a local Ollama + Qwen2.5-Coder so no
 # key is needed and code never leaves the machine. Swap provider via .env only.
 EXPLAIN_BASE_URL = os.getenv("EXPLAIN_BASE_URL", "http://localhost:11434/v1")
-EXPLAIN_MODEL    = os.getenv("EXPLAIN_MODEL", "qwen2.5-coder:7b")
+EXPLAIN_MODEL    = os.getenv("EXPLAIN_MODEL", "qwen2.5-coder:7b")  # default pairs with local Ollama; override via .env
 EXPLAIN_API_KEY  = os.getenv("EXPLAIN_API_KEY", "ollama")  # Ollama ignores it; real key for Groq/etc.
 
 _explain_client = None
