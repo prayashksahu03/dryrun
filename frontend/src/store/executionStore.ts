@@ -181,11 +181,11 @@ function buildInterviewSummary(trace: Trace): string {
   return parts.join('\n');
 }
 
-async function postInterview(trace: Trace, history: InterviewTurn[]): Promise<string> {
+async function postInterview(trace: Trace, history: InterviewTurn[], problem = ''): Promise<string> {
   const res = await fetch(`${BACKEND}/interview`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ source: trace.source, summary: buildInterviewSummary(trace), history }),
+    body: JSON.stringify({ source: trace.source, summary: buildInterviewSummary(trace), problem, history }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: `Server error ${res.status}` }));
@@ -213,6 +213,12 @@ interface ExecutionStore {
   // Top-level mode: which experience fills the main area.
   appMode: AppMode;
   setAppMode: (mode: AppMode) => void;
+
+  // When solving a specific OA question, its statement — used to ground the
+  // interviewer (and tutor) in "does your code solve THIS problem?". Null for
+  // free-practice at /app.
+  problemStatement: string | null;
+  setProblemStatement: (s: string | null) => void;
 
   activeGuidedProgram: GuidedProgram | null;
 
@@ -280,6 +286,9 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
   panels: { stack: true, heap: true, callTree: true, eventLog: true },
   appMode: 'debug',
   setAppMode: (mode) => set({ appMode: mode }),
+
+  problemStatement: null,
+  setProblemStatement: (s) => set({ problemStatement: s }),
   activeGuidedProgram: null,
   ambiguities: [],
   vizHints: {},
@@ -532,11 +541,11 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
 
   // Interview: the LLM interviewer opens with a question about the candidate's code.
   startInterview: async () => {
-    const { trace } = get();
+    const { trace, problemStatement } = get();
     if (!trace) return;
     set({ interviewLoading: true, interviewError: null, interview: { history: [] } });
     try {
-      const msg = await postInterview(trace, []);
+      const msg = await postInterview(trace, [], problemStatement ?? '');
       set({ interviewLoading: false, interview: { history: [{ role: 'interviewer', content: msg }] } });
     } catch (e) {
       set({ interviewLoading: false, interview: null, interviewError: e instanceof Error ? e.message : String(e) });
@@ -545,12 +554,12 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
 
   // Candidate answers → interviewer gives feedback + the next question.
   answerInterview: async (answer) => {
-    const { trace, interview } = get();
+    const { trace, interview, problemStatement } = get();
     if (!trace || !interview || !answer.trim()) return;
     const history: InterviewTurn[] = [...interview.history, { role: 'candidate', content: answer.trim() }];
     set({ interviewLoading: true, interviewError: null, interview: { history } });
     try {
-      const msg = await postInterview(trace, history);
+      const msg = await postInterview(trace, history, problemStatement ?? '');
       set({
         interviewLoading: false,
         interview: { history: [...history, { role: 'interviewer', content: msg }] },

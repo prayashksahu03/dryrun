@@ -569,6 +569,7 @@ class InterviewTurn(BaseModel):
 class InterviewRequest(BaseModel):
     source: str
     summary: str = ''    # compact trace summary (output, algorithm, warnings) — optional grounding
+    problem: str = ''    # the OA problem statement the candidate is solving — optional grounding
     history: List[InterviewTurn] = []
 
 
@@ -585,7 +586,13 @@ async def interview(req: InterviewRequest):
     if client is None:
         raise HTTPException(status_code=503, detail="Interview is unavailable — the LLM client isn't installed.")
 
-    context = "Candidate's code:\n```cpp\n" + req.source + "\n```"
+    context = ""
+    if req.problem.strip():
+        context += ("The candidate is solving THIS problem (from a company OA):\n"
+                    + req.problem.strip()[:4000]
+                    + "\n\nJudge their code against THIS problem — does it actually solve it? "
+                    "Probe missed requirements, constraints, and edge cases the problem implies.\n\n")
+    context += "Candidate's code:\n```cpp\n" + req.source + "\n```"
     if req.summary:
         context += "\n\nWhat the interpreter observed when running it:\n" + req.summary
     messages = [{"role": "system", "content": INTERVIEW_SYSTEM + "\n\n" + context}]
