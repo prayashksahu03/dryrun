@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Analytics } from '@vercel/analytics/react';
+import { Link } from 'react-router-dom';
 import { useExecutionStore } from './store/executionStore';
 import { useKeyboardNav } from './hooks/useKeyboardNav';
 import CodePanel from './components/CodePanel';
@@ -100,7 +100,7 @@ export default function App() {
       {/* Nav */}
       <header className="flex items-center justify-between px-5 h-11 border-b border-zinc-800/80 flex-shrink-0 bg-[#09090b]/90 backdrop-blur z-20">
         <div className="flex items-center gap-3">
-          <span className="text-violet-400 font-mono font-semibold text-sm tracking-tight">◈ DryRun</span>
+          <Link to="/" className="text-violet-400 font-mono font-semibold text-sm tracking-tight hover:text-violet-300 transition-colors" title="Home">◈ DryRun</Link>
           <span className="text-zinc-700">│</span>
           <span className="text-zinc-500 text-xs font-mono truncate max-w-xs">
             {activeGuidedProgram ? activeGuidedProgram.title : trace ? trace.name : 'Write your program'}
@@ -250,7 +250,6 @@ export default function App() {
 
       <TimelineBar />
       <AmbiguityPanel />
-      <Analytics />
     </div>
   );
 }
