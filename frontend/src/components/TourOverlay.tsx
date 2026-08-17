@@ -48,16 +48,10 @@ export const TOUR_STEPS: TourStep[] = [
     placement: 'left',
   },
   {
-    target: '[data-tour="mode-switch"]',
-    title: 'Debug · Tutor · Interview',
-    body: 'Switch modes here. Debug is this memory view. Tutor gives you an AI that explains any step and walks you through the code (grounded in the real trace). Interview runs a mock interviewer that quizzes you on the code you wrote.',
-    placement: 'bottom',
-  },
-  {
-    target: '[data-tour="learn-button"]',
-    title: 'Learn Mode',
-    body: 'Pick a guided walkthrough — Pointers, Heap, Recursion, Linked List, or Binary Search — and get author-written hints at every key moment.',
-    placement: 'bottom',
+    target: '[data-tour="menu"]',
+    title: 'The menu',
+    body: 'Open this to switch modes — Debug (this memory view), Tutor (an AI that explains any step & walks you through the code, grounded in the real trace), and Interview (a mock interviewer on your code) — plus Learn lessons, the tour, and feedback.',
+    placement: 'right',
   },
 ];
 

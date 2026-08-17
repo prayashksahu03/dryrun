@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { Menu } from 'lucide-react';
+import ToolNavDrawer from './components/ToolNavDrawer';
 import { useExecutionStore } from './store/executionStore';
 import { useKeyboardNav } from './hooks/useKeyboardNav';
 import CodePanel from './components/CodePanel';
@@ -13,7 +15,6 @@ import AmbiguityPanel from './components/AmbiguityPanel';
 import AiLeftPane from './components/AiLeftPane';
 import TutorConversation from './components/TutorConversation';
 import InterviewConversation from './components/InterviewConversation';
-import type { AppMode } from './store/executionStore';
 
 // ── Column drag handle ────────────────────────────────────────────────────
 
@@ -64,13 +65,14 @@ function ColDivider({ onDrag }: { onDrag: (dx: number) => void }) {
 // ── App ───────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const { isPlaying, stepForward, trace, currentStep, playbackSpeed, currentFrame, activeGuidedProgram, appMode, setAppMode } = useExecutionStore();
+  const { isPlaying, stepForward, trace, currentStep, playbackSpeed, currentFrame, activeGuidedProgram, appMode } = useExecutionStore();
   useKeyboardNav();
 
   const frame = currentFrame();
   const isCrash = frame?.event.type === 'crash';
 
   const [learnOpen, setLearnOpen] = useState(false);
+  const [navOpen, setNavOpen] = useState(false);
   const isFirstVisit = !localStorage.getItem('dryrun_visited');
   const [tourStep, setTourStep] = useState<number | null>(isFirstVisit ? 0 : null);
 
@@ -98,11 +100,23 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen bg-[#09090b] text-zinc-100 overflow-hidden select-none">
       {/* Nav */}
-      <header className="flex items-center justify-between px-5 h-11 border-b border-zinc-800/80 flex-shrink-0 bg-[#09090b]/90 backdrop-blur z-20">
-        <div className="flex items-center gap-3">
+      <header className="flex items-center justify-between px-4 h-11 border-b border-zinc-800/80 flex-shrink-0 bg-[#09090b]/90 backdrop-blur z-20">
+        <div className="flex items-center gap-2.5">
+          <button
+            data-tour="menu"
+            onClick={() => setNavOpen(true)}
+            title="Menu"
+            aria-label="Open menu"
+            className="h-8 w-8 flex items-center justify-center rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
+          >
+            <Menu size={18} />
+          </button>
           <Link to="/" className="text-violet-400 font-mono font-semibold text-sm tracking-tight hover:text-violet-300 transition-colors" title="Home">◈ DryRun</Link>
-          <span className="text-zinc-700">│</span>
-          <span className="text-zinc-500 text-xs font-mono truncate max-w-xs">
+          <span className="hidden sm:inline text-[10px] font-mono capitalize px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300 border border-violet-500/25">
+            {appMode}
+          </span>
+          <span className="text-zinc-700 hidden md:inline">│</span>
+          <span className="hidden md:inline text-zinc-500 text-xs font-mono truncate max-w-xs">
             {activeGuidedProgram ? activeGuidedProgram.title : trace ? trace.name : 'Write your program'}
           </span>
           {activeGuidedProgram && (
@@ -112,28 +126,6 @@ export default function App() {
           )}
         </div>
         <div className="flex items-center gap-3">
-          {/* Mode switch */}
-          <div data-tour="mode-switch" className="flex items-center rounded-md border border-zinc-700/60 overflow-hidden">
-            {(['debug', 'tutor', 'interview'] as AppMode[]).map(m => {
-              const on = appMode === m;
-              const disabled = m !== 'debug' && !trace;
-              return (
-                <button
-                  key={m}
-                  onClick={() => { if (!disabled) setAppMode(m); }}
-                  disabled={disabled}
-                  title={disabled ? 'Run a program first' : `${m} mode`}
-                  className={[
-                    'h-7 px-2.5 text-[11px] font-mono capitalize transition-colors',
-                    on ? 'bg-violet-500/25 text-violet-200' : 'text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800',
-                    disabled ? 'opacity-40 cursor-not-allowed' : '',
-                  ].join(' ')}
-                >
-                  {m}
-                </button>
-              );
-            })}
-          </div>
           {isCrash && (() => {
             const ev = frame?.event as { type: 'crash'; kind: string } | undefined;
             const LABELS: Record<string, string> = {
@@ -154,40 +146,10 @@ export default function App() {
               step {currentStep + 1}<span className="text-zinc-700">/{trace.steps.length}</span>
             </span>
           )}
-          <span className="text-zinc-700 text-xs font-mono hidden sm:block">← → to step  ·  space to play</span>
-          <span className="text-[11px] font-mono text-zinc-500 hidden md:block">
-            👋 your feedback shapes what we build next —
-          </span>
-          <a
-            href="https://tally.so/r/vGJyED"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="h-7 px-2.5 rounded text-[11px] font-mono font-medium flex items-center transition-all bg-violet-500/15 text-violet-400 border border-violet-500/30 hover:bg-violet-500/25 hover:text-violet-300 hover:border-violet-500/50"
-          >
-            feedback
-          </a>
-          <button
-            onClick={startTour}
-            className="h-7 px-2.5 rounded text-[11px] font-mono text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-all border border-zinc-700/50 hover:border-zinc-600/70"
-            title="App tour"
-          >
-            ? tour
-          </button>
-          <button
-            data-tour="learn-button"
-            onClick={() => setLearnOpen(o => !o)}
-            className={`flex items-center gap-1.5 h-7 px-2.5 rounded text-[11px] font-mono font-medium transition-all ${
-              learnOpen || activeGuidedProgram
-                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/35'
-                : 'bg-zinc-800/80 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700/80 border border-zinc-700/60'
-            }`}
-          >
-            <span className="text-[10px]">◈</span>
-            Learn
-          </button>
         </div>
       </header>
 
+      <ToolNavDrawer open={navOpen} onClose={() => setNavOpen(false)} onStartTour={startTour} />
       <LearnPanel open={learnOpen} onClose={() => setLearnOpen(false)} />
 
 
