@@ -12,8 +12,10 @@ services:
       - key: EXPLAIN_BASE_URL
         value: https://api.groq.com/openai/v1
       - key: EXPLAIN_MODEL
-        value: allam-2-7b              # CURRENT non-reasoning Groq model (fast, clean). Groq rotates models —
-                                       # verify/swap at console.groq.com/docs/models; avoid reasoning models
-                                       # (they emit <think> and burn the token budget before answering).
+        value: openai/gpt-oss-120b     # strong open-weight model (deep questions). Groq rotates models —
+                                       # verify/swap at console.groq.com/docs/models.
+      - key: EXPLAIN_REASONING
+        value: hidden                  # suppress <think> traces from reasoning models (Groq param).
+                                       # Leave unset for non-reasoning models / local Ollama.
       - key: EXPLAIN_API_KEY
         sync: false          # secret — set this in the Render dashboard, not in git

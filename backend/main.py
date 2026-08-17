@@ -136,8 +136,14 @@ async def report(req: ReportRequest):
 EXPLAIN_BASE_URL = os.getenv("EXPLAIN_BASE_URL", "http://localhost:11434/v1")
 EXPLAIN_MODEL    = os.getenv("EXPLAIN_MODEL", "qwen2.5-coder:7b")  # default pairs with local Ollama; override via .env
 EXPLAIN_API_KEY  = os.getenv("EXPLAIN_API_KEY", "ollama")  # Ollama ignores it; real key for Groq/etc.
+# Reasoning models (e.g. Groq's gpt-oss/qwen3) deliver much deeper output but emit
+# <think> traces. Set EXPLAIN_REASONING=hidden to suppress them (Groq param); leave
+# empty for non-reasoning models / Ollama. Reasoning eats tokens, so max_tokens is
+# generous below to leave room for the answer after the thinking.
+EXPLAIN_REASONING = os.getenv("EXPLAIN_REASONING", "")
 
 _explain_client = None
+_THINK_RE = re.compile(r'<think>.*?</think>\s*', re.DOTALL)
 
 
 def _get_explain_client():
@@ -149,12 +155,29 @@ def _get_explain_client():
     if _explain_client is None:
         # max_retries: the SDK retries transient 429/5xx/connection blips with
         # exponential backoff before surfacing — important on free-tier providers
-        # (Groq) that briefly 503 under load. timeout bounds a hung request.
+        # (Groq) that briefly 503 under load. timeout is generous for reasoning models.
         _explain_client = OpenAI(
             base_url=EXPLAIN_BASE_URL, api_key=EXPLAIN_API_KEY,
-            max_retries=4, timeout=45.0,
+            max_retries=4, timeout=90.0,
         )
     return _explain_client
+
+
+def _chat(client, messages, max_tokens: int, temperature: float = 0.3, want_json: bool = False) -> str:
+    """One chat completion, returning clean text. Adds reasoning_format (when
+    configured) so reasoning models don't leak <think>; JSON mode with a graceful
+    fallback; and a safety strip of any <think> block that slips through."""
+    kwargs: dict = dict(model=EXPLAIN_MODEL, messages=messages, max_tokens=max_tokens, temperature=temperature)
+    if EXPLAIN_REASONING:
+        kwargs["extra_body"] = {"reasoning_format": EXPLAIN_REASONING}
+    if want_json:
+        try:
+            resp = client.chat.completions.create(response_format={"type": "json_object"}, **kwargs)
+            return _THINK_RE.sub('', resp.choices[0].message.content or "").strip()
+        except Exception:
+            pass  # provider rejected JSON mode — fall through to plain + tolerant parse
+    resp = client.chat.completions.create(**kwargs)
+    return _THINK_RE.sub('', resp.choices[0].message.content or "").strip()
 
 
 def _llm_http_error(e: Exception) -> HTTPException:
@@ -306,16 +329,10 @@ def _run_explain(req: ExplainRequest) -> str:
             status_code=503,
             detail="Explain is unavailable — the LLM client isn't installed on the server "
                    "(pip install openai).")
-    resp = client.chat.completions.create(
-        model=EXPLAIN_MODEL,
-        max_tokens=400,
-        temperature=0.2,
-        messages=[
-            {"role": "system", "content": EXPLAIN_SYSTEM},
-            {"role": "user",   "content": _build_facts(req)},
-        ],
-    )
-    return (resp.choices[0].message.content or "").strip()
+    return _chat(client, [
+        {"role": "system", "content": EXPLAIN_SYSTEM},
+        {"role": "user",   "content": _build_facts(req)},
+    ], max_tokens=1200, temperature=0.2)
 
 
 @app.post("/explain", response_model=ExplainResponse)
@@ -463,23 +480,11 @@ def _run_walkthrough(req: WalkthroughRequest) -> list:
     facts = _build_walk_facts(req)
     if len(facts) > _SNAPSHOT_CHAR_CAP * 2:
         facts = facts[:_SNAPSHOT_CHAR_CAP * 2] + "\n...(truncated)"
-    kwargs = dict(
-        model=EXPLAIN_MODEL,
-        max_tokens=900,
-        temperature=0.2,
-        messages=[
-            {"role": "system", "content": WALKTHROUGH_SYSTEM},
-            {"role": "user",   "content": facts},
-        ],
-    )
-    # JSON mode forces syntactically valid output. Fall back gracefully if the
-    # provider rejects the param (older/other backends).
-    try:
-        resp = client.chat.completions.create(
-            response_format={"type": "json_object"}, **kwargs)
-    except Exception:
-        resp = client.chat.completions.create(**kwargs)
-    raw = (resp.choices[0].message.content or "").strip()
+    # Generous max_tokens: reasoning models think first, then emit the JSON beats.
+    raw = _chat(client, [
+        {"role": "system", "content": WALKTHROUGH_SYSTEM},
+        {"role": "user",   "content": facts},
+    ], max_tokens=3000, temperature=0.2, want_json=True)
     parsed = _parse_beats(raw)
     if not isinstance(parsed, list):
         raise HTTPException(status_code=502, detail="Tutor returned an unreadable plan. Try again.")
@@ -537,18 +542,22 @@ async def walkthrough(req: WalkthroughRequest):
 # summary so it can probe correctness/complexity/edge-cases and check answers
 # against what the code really does. Stateless: the frontend holds the transcript.
 INTERVIEW_SYSTEM = (
-    "You are a technical interviewer conducting a coding interview. The candidate wrote the code "
-    "below (for a problem they were given). Interview them about THEIR code.\n"
+    "You are a SENIOR technical interviewer running a rigorous coding interview (FAANG bar). The "
+    "candidate wrote the code below. Interview them about THEIR code — go deep.\n"
     "Rules:\n"
-    "- Ask ONE question at a time — never a list. No markdown bullet points.\n"
-    "- Base every question on their ACTUAL code: design choices, correctness, edge cases, time/space "
-    "complexity, 'what happens if <input/scenario>', or trace through a specific part.\n"
-    "- After the candidate answers, give ONE short sentence of feedback (correct / partially right / "
-    "off — and why briefly), THEN ask the next question. Go progressively deeper and follow up on "
-    "weak or vague answers.\n"
-    "- Ground your feedback in the code + trace summary; don't claim behavior the code doesn't show.\n"
-    "- Be encouraging but rigorous. Don't hand over the answer unless the candidate is clearly stuck "
-    "(then give a small hint). Keep each turn to 2-4 sentences."
+    "- Ask ONE focused question at a time. No lists, no markdown bullets.\n"
+    "- Skip shallow 'what does this do' questions. Probe DEPTH: exact time/space complexity and WHY; "
+    "specific edge cases their code mishandles (empty input, cycles, disconnected parts, duplicates, "
+    "overflow, single element); correctness under adversarial inputs; WHY this approach over "
+    "alternatives (e.g. Kahn's vs DFS); what breaks if a precondition is violated; and trade-offs.\n"
+    "- FOLLOW UP relentlessly. If an answer is vague or hand-wavy, drill in ('be specific — which line, "
+    "and what exactly happens?'). If the answer CONTRADICTS the code (e.g. they say 'stack' but the "
+    "code uses a queue), catch it and make them reconcile it with their actual code.\n"
+    "- After each answer, give ONE crisp feedback sentence (right / partially / wrong, and why — "
+    "grounded in the code + trace), THEN ask a HARDER follow-up that builds on what they just said. "
+    "Escalate difficulty each turn.\n"
+    "- Never invent behavior the code+trace don't show. Don't give away answers unless they're truly "
+    "stuck (then a minimal hint). Keep each turn tight: 2-4 sentences."
 )
 
 
@@ -591,9 +600,7 @@ async def interview(req: InterviewRequest):
             messages.append({"role": role, "content": t.content})
 
     try:
-        resp = client.chat.completions.create(
-            model=EXPLAIN_MODEL, max_tokens=350, temperature=0.5, messages=messages)
-        text = (resp.choices[0].message.content or "").strip()
+        text = _chat(client, messages, max_tokens=1200, temperature=0.5)
     except Exception as e:
         raise _llm_http_error(e)
     if not text:
