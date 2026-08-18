@@ -125,15 +125,9 @@ export type Language = 'c' | 'cpp' | 'python';
 // Top-level view. Debug = memory/animation; Tutor = AI explainer; Interview = mock interviewer.
 export type AppMode = 'debug' | 'tutor' | 'interview';
 
-// Views bar now governs ONLY the memory panels — the AI features are top-level modes.
-export type PanelKey = 'stack' | 'heap' | 'callTree' | 'eventLog';
-
-export const PANEL_LABELS: Record<PanelKey, string> = {
-  stack:     'Stack',
-  heap:      'Heap',
-  callTree:  'Call Tree',
-  eventLog:  'Event Log',
-};
+// (The views bar + inspector are gone: debug mode is Code | Memory | Animation.
+//  Stack + inline heap render in the memory column; semantic views animate on
+//  the right. No per-panel toggles remain.)
 
 // One message in the Tutor conversation. A message with a `step` is clickable and
 // drives the animation (goToStep) — walkthrough beats and per-step explains carry one.
@@ -208,8 +202,6 @@ interface ExecutionStore {
   demoIndex: number;
   language: Language;
 
-  panels: Record<PanelKey, boolean>;
-
   // Top-level mode: which experience fills the main area.
   appMode: AppMode;
   setAppMode: (mode: AppMode) => void;
@@ -263,7 +255,6 @@ interface ExecutionStore {
   setEditorSource: (src: string) => void;
   setStdinInput: (input: string) => void;
   setLanguage: (lang: Language) => void;
-  togglePanel: (panel: PanelKey) => void;
   runCode: () => Promise<void>;
   reportIssue: (note?: string) => Promise<boolean>;
   clearTrace: () => void;
@@ -283,7 +274,6 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
   error: null,
   demoIndex: 0,
   language: 'cpp' as Language,
-  panels: { stack: true, heap: true, callTree: true, eventLog: true },
   appMode: 'debug',
   setAppMode: (mode) => set({ appMode: mode }),
 
@@ -370,7 +360,6 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
   }),
   setStdinInput: (input) => set({ stdinInput: input }),
   setLanguage: (lang) => set({ language: lang, error: null }),
-  togglePanel: (panel) => set(s => ({ panels: { ...s.panels, [panel]: !s.panels[panel] } })),
 
   clearTrace: () =>
     set(s => ({

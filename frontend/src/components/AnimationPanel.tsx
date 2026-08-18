@@ -1,14 +1,18 @@
-import { AnimatePresence } from 'framer-motion';
-import { useExecutionStore } from '../../store/executionStore';
-import { HeapBlock, MemorySnapshot, VariableValue } from '../../types/trace';
-import { VizHint } from '../../types/ambiguity';
-import HeapBlockComponent from './HeapBlock';
-import { getVisualIdentity } from '../../utils/visualIdentity';
-import TreeView from './TreeView';
-import TrieView, { findTrieRoot } from './TrieView';
-import GraphViz from '../graph/GraphViz';
-import GridView from '../graph/GridView';
-import SegTreeViz from '../arrays/SegTreeViz';
+import { useExecutionStore } from '../store/executionStore';
+import { HeapBlock, MemorySnapshot, VariableValue } from '../types/trace';
+import { VizHint } from '../types/ambiguity';
+import TreeView from './heap/TreeView';
+import TrieView, { findTrieRoot } from './heap/TrieView';
+import GraphViz from './graph/GraphViz';
+import GridView from './graph/GridView';
+import SegTreeViz from './arrays/SegTreeViz';
+import ErrorExplainer from './ErrorExplainer';
+
+// The Animation panel: the semantic, structure-level view of the run — grids,
+// graphs, trees, tries, segment trees. Raw memory (stack frames + loose heap
+// blocks) lives in the memory column to its left; this panel is where the
+// algorithm's SHAPE animates. Lives inside MemoryCanvas's registry/arrow
+// canvas, so pointer arrows from stack variables still reach tree/trie nodes.
 
 function isTreeHeap(heap: Record<string, HeapBlock>): boolean {
   return Object.values(heap).some(
@@ -89,7 +93,27 @@ function findCurrentTreeNode(
   return null;
 }
 
-export default function HeapZone() {
+/** True when the heap's blocks are consumed by a structure view here (tree /
+ *  trie) — the memory column uses this to keep those blocks out of its inline
+ *  heap strip so they aren't drawn twice. */
+export function heapClaimedByAnimation(heap: Record<string, HeapBlock>): boolean {
+  return isTreeHeap(heap) || isTrieHeap(heap);
+}
+
+function EmptyState() {
+  return (
+    <div className="flex-1 flex items-center justify-center">
+      <div className="text-center max-w-[220px]">
+      <div className="text-zinc-800 text-2xl mb-2">◇</div>
+        <span className="text-zinc-700 text-[11px] font-mono leading-relaxed block">
+          structures animate here — arrays, graphs, grids, trees appear as your code builds them
+        </span>
+      </div>
+    </div>
+  );
+}
+
+export default function AnimationPanel() {
   const { currentFrame, prevFrame, vizHints } = useExecutionStore();
   const frame = currentFrame();
   const prev  = prevFrame();
@@ -103,29 +127,24 @@ export default function HeapZone() {
 
   const entries = Object.entries(heap);
 
-  // ── Semantic views: render the interpreter-declared descriptors 1:1 ──────
-  // Structure and roles are declared per step by the backend semantic-view
-  // resolver — the frontend performs ZERO detection. A grid is a projection
-  // (rendered natively as cells), so it takes precedence over the graph reading;
-  // a step never carries both. Descriptors persist once a run's traversal
-  // begins, so the view never vanishes when the frontier drains.
+  // Body: the interpreter-declared semantic view, 1:1, no frontend detection
+  // beyond what HeapZone historically did. Grid > graph (a step never carries
+  // both); then stack-declared segment trees; then heap-shaped trees/tries.
+  let body: React.ReactNode = null;
+
   if (frame.grid) {
-    return (
+    body = (
       <div className="flex-1 overflow-y-auto p-2 flex items-start justify-center">
         <GridView grid={frame.grid} execution={frame.execution} />
       </div>
     );
-  }
-  if (frame.graph) {
-    return (
+  } else if (frame.graph) {
+    body = (
       <div className="flex-1 overflow-y-auto">
         <GraphViz graph={frame.graph} execution={frame.execution} />
       </div>
     );
-  }
-
-  // ── Empty heap: try a segment tree from the stack ──
-  if (entries.length === 0) {
+  } else if (entries.length === 0) {
     const segTree = detectSegTree(frame.memory, vizHints);
     if (segTree) {
       let prevValue: VariableValue | undefined;
@@ -135,7 +154,7 @@ export default function HeapZone() {
           if (v) { prevValue = v; break; }
         }
       }
-      return (
+      body = (
         <div className="flex-1 overflow-y-auto px-2 pt-2">
           <SegTreeViz
             name={segTree.name}
@@ -147,52 +166,48 @@ export default function HeapZone() {
           />
         </div>
       );
-    }
+    } else {
+      // Standalone 1D array marked as segtree_flat by user
+      outer:
+      for (let fi = frame.memory.stack.length - 1; fi >= 0; fi--) {
+        const frameVars = frame.memory.stack[fi].variables;
+        for (const [varName, val] of Object.entries(frameVars)) {
+          const hint = vizHints[varName];
+          if (hint?.kind !== 'segtree_flat') continue;
+          if (val.kind !== 'array' || val.rows || val.cols) continue;
 
-    // Standalone 1D array marked as segtree_flat by user
-    for (let fi = frame.memory.stack.length - 1; fi >= 0; fi--) {
-      const frameVars = frame.memory.stack[fi].variables;
-      for (const [varName, val] of Object.entries(frameVars)) {
-        const hint = vizHints[varName];
-        if (hint?.kind !== 'segtree_flat') continue;
-        if (val.kind !== 'array' || val.rows || val.cols) continue;
+          const rawArr = (val.values as unknown[]).filter(v => typeof v === 'number') as number[];
+          if (rawArr.length < 4) continue;
 
-        const rawArr = (val.values as unknown[]).filter(v => typeof v === 'number') as number[];
-        if (rawArr.length < 4) continue;
+          // Find n: from local frame variable, fallback to size/4
+          let n = 0;
+          for (const vname of ['n', 'sz', 'size', 'N']) {
+            const v = frameVars[vname];
+            if (v?.kind === 'int' && v.value > 0) { n = v.value; break; }
+          }
+          if (!n) n = Math.round(rawArr.length / 4);
 
-        // Find n: from local frame variable, fallback to size/4
-        let n = 0;
-        for (const vname of ['n', 'sz', 'size', 'N']) {
-          const v = frameVars[vname];
-          if (v?.kind === 'int' && v.value > 0) { n = v.value; break; }
+          const prevRaw = prev?.memory.stack[fi]?.variables[varName];
+          const prevArr = prevRaw?.kind === 'array'
+            ? (prevRaw.values as unknown[]).filter(v => typeof v === 'number') as number[]
+            : undefined;
+
+          body = (
+            <div className="flex-1 overflow-y-auto px-2 pt-2">
+              <SegTreeViz
+                name={varName}
+                rawTreeArr={rawArr}
+                rawPrevTreeArr={prevArr}
+                nOverride={n}
+                indexBase={hint.indexBase}
+              />
+            </div>
+          );
+          break outer;
         }
-        if (!n) n = Math.round(rawArr.length / 4);
-
-        const prevRaw = prev?.memory.stack[fi]?.variables[varName];
-        const prevArr = prevRaw?.kind === 'array'
-          ? (prevRaw.values as unknown[]).filter(v => typeof v === 'number') as number[]
-          : undefined;
-
-        return (
-          <div className="flex-1 overflow-y-auto px-2 pt-2">
-            <SegTreeViz
-              name={varName}
-              rawTreeArr={rawArr}
-              rawPrevTreeArr={prevArr}
-              nOverride={n}
-              indexBase={hint.indexBase}
-            />
-          </div>
-        );
       }
     }
-    return (
-      <div className="text-zinc-800 text-xs font-mono">no heap allocations yet</div>
-    );
-  }
-
-  // ── Trie (heap blocks with children[26] pointer array) ──
-  if (isTrieHeap(heap)) {
+  } else if (isTrieHeap(heap)) {
     const rootAddr = findTrieRoot(heap);
     // Find the active trie node: look for 'curr' / 'node' pointer vars in any frame
     let currentNodeAddr: string | null = null;
@@ -207,38 +222,29 @@ export default function HeapZone() {
       }
       if (currentNodeAddr) break;
     }
-    return (
+    body = (
       <div className="flex-1 flex items-start justify-center min-h-0 pt-2">
         <TrieView heap={heap} crashAddr={crashAddr} currentNodeAddr={currentNodeAddr} />
       </div>
     );
-  }
-
-  // ── Binary tree (heap blocks with left/right pointer fields) ──
-  if (isTreeHeap(heap)) {
+  } else if (isTreeHeap(heap)) {
     const currentNodeAddr = findCurrentTreeNode(frame.memory, heap);
-    return (
+    body = (
       <div className="flex-1 flex items-start justify-center min-h-0">
         <TreeView heap={heap} crashAddr={crashAddr} currentNodeAddr={currentNodeAddr} />
       </div>
     );
   }
 
-  // ── Default: wrapping grid for linked-list / flat heap ──
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="flex flex-wrap gap-4 content-start min-h-[80px]">
-        <AnimatePresence>
-          {entries.map(([addr, block]) => (
-            <HeapBlockComponent
-              key={getVisualIdentity(block, addr)}
-              address={addr}
-              block={block}
-              isCrashTarget={addr === crashAddr}
-            />
-          ))}
-        </AnimatePresence>
-      </div>
+    <div data-tour="animation-zone" className="flex-1 flex flex-col min-h-0 min-w-0 px-4 pt-8 pb-3 relative z-10">
+      {/* Crash explainer — surfaced here now that the inspector is gone */}
+      {isCrash && (
+        <div className="flex-shrink-0 mb-2 overflow-y-auto max-h-[45%]">
+          <ErrorExplainer />
+        </div>
+      )}
+      {body ?? <EmptyState />}
     </div>
   );
 }

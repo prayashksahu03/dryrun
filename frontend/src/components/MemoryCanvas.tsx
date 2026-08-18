@@ -1,21 +1,71 @@
 import { useRef, useCallback, useState, useEffect, useLayoutEffect, useMemo } from 'react';
-import { useExecutionStore, PanelKey } from '../store/executionStore';
+import { AnimatePresence } from 'framer-motion';
+import { useExecutionStore } from '../store/executionStore';
 import { RefRegistryContext } from '../contexts/refRegistry';
 import StackZone from './stack/StackZone';
-import HeapZone from './heap/HeapZone';
+import HeapBlockComponent from './heap/HeapBlock';
+import AnimationPanel, { heapClaimedByAnimation } from './AnimationPanel';
 import ArrowLayer from './arrows/ArrowLayer';
 import HintCard from './HintCard';
 import CauseRibbon from './CauseRibbon';
+import { getVisualIdentity } from '../utils/visualIdentity';
 import { resolveHints } from '../data/guided';
 
-const MIN_PCT = 18;
-const MAX_PCT = 78;
-const DEFAULT_PCT = 42;
+const MIN_PCT = 24;
+const MAX_PCT = 60;
+const DEFAULT_PCT = 36;
 
+// ── Inline heap strip ───────────────────────────────────────────────────────
+// Heap allocations live INSIDE the memory column, under the stack — the heap is
+// rare enough that it doesn't earn a dedicated zone. A dashed separator + label
+// keeps it distinguishable. Blocks consumed by a structure view (tree/trie) are
+// drawn in the Animation panel instead, so they're skipped here.
+function HeapInline() {
+  const { currentFrame } = useExecutionStore();
+  const frame = currentFrame();
+  if (!frame) return null;
+
+  const heap = frame.memory.heap;
+  const entries = Object.entries(heap);
+  if (entries.length === 0 || heapClaimedByAnimation(heap)) return null;
+
+  const isCrash   = frame.event.type === 'crash';
+  const crashAddr = isCrash
+    ? (frame.event as { type: 'crash'; address?: string }).address
+    : undefined;
+
+  return (
+    <div className="flex-shrink-0 pt-2 pb-1" data-tour="heap-zone">
+      <div className="flex items-center gap-2 mb-2">
+        <span className="text-[9px] font-mono text-zinc-700 tracking-[0.18em] uppercase">heap</span>
+        <div className="flex-1 border-t border-dashed border-zinc-800/70" />
+      </div>
+      <div className="flex flex-wrap gap-3 content-start overflow-y-auto max-h-[38vh]">
+        <AnimatePresence>
+          {entries.map(([addr, block]) => (
+            <HeapBlockComponent
+              key={getVisualIdentity(block, addr)}
+              address={addr}
+              block={block}
+              isCrashTarget={addr === crashAddr}
+            />
+          ))}
+        </AnimatePresence>
+      </div>
+    </div>
+  );
+}
+
+// ── MemoryCanvas ────────────────────────────────────────────────────────────
+// The whole right-of-code area: memory column (stack frames + inline heap) in
+// the middle of the app, animation panel (grids/graphs/trees) on the right.
+// One registry + one arrow overlay span BOTH columns, so pointer arrows keep
+// working from stack variables to heap blocks and tree/trie nodes wherever
+// they render.
 export default function MemoryCanvas() {
   const canvasRef    = useRef<HTMLDivElement>(null);
   const registryMap  = useRef<Map<string, HTMLElement>>(new Map());
-  const { currentStep, panels, trace, activeGuidedProgram } = useExecutionStore();
+  const { currentStep, trace, activeGuidedProgram } = useExecutionStore();
 
   const resolvedHints = useMemo(
     () => (trace && activeGuidedProgram)
@@ -29,18 +79,14 @@ export default function MemoryCanvas() {
   const _frame = trace ? trace.steps[currentStep] : null;
   const cause = _frame && _frame.event.type === 'assign' ? _frame.event.cause : undefined;
 
-  const showStack = panels['stack' as PanelKey];
-  const showHeap  = panels['heap'  as PanelKey];
-  const [tick, setTick]         = useState(0);
-  const [stackPct, setStackPct] = useState(DEFAULT_PCT);
+  const [tick, setTick]       = useState(0);
+  const [memPct, setMemPct]   = useState(DEFAULT_PCT);
   const [dragging, setDragging] = useState(false);
-  const isDragging              = useRef(false);
-  const lastCanvasWidth         = useRef(0);
+  const isDragging            = useRef(false);
+  const lastCanvasWidth       = useRef(0);
 
-  // Bump tick synchronously whenever the canvas width changes (external panel resize).
-  // useLayoutEffect runs after every render — if the CSS width changed (because
-  // App.tsx updated codePct / inspectorPct), we detect it here and bump tick so
-  // ArrowLayer recomputes paths against the new node positions immediately.
+  // Bump tick synchronously whenever the canvas width changes (external panel
+  // resize) so ArrowLayer recomputes paths against new node positions.
   useLayoutEffect(() => {
     if (!canvasRef.current) return;
     const w = canvasRef.current.offsetWidth;
@@ -62,7 +108,7 @@ export default function MemoryCanvas() {
     return () => cancelAnimationFrame(id);
   }, [currentStep]);
 
-  // ── Divider drag ───────────────────────────────────────────────────
+  // ── Column divider drag (memory | animation) ─────────────────────────────
   const onDividerPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
     isDragging.current = true;
@@ -73,8 +119,8 @@ export default function MemoryCanvas() {
   const onDividerPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!isDragging.current || !canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
-    const pct  = ((e.clientY - rect.top) / rect.height) * 100;
-    setStackPct(Math.min(Math.max(pct, MIN_PCT), MAX_PCT));
+    const pct  = ((e.clientX - rect.left) / rect.width) * 100;
+    setMemPct(Math.min(Math.max(pct, MIN_PCT), MAX_PCT));
     setTick(t => t + 1);
   };
 
@@ -87,11 +133,11 @@ export default function MemoryCanvas() {
     <RefRegistryContext.Provider value={{ register, getEl, canvasRef }}>
       <div
         ref={canvasRef}
-        className="flex-1 flex flex-col relative overflow-hidden"
+        className="flex-1 flex relative overflow-hidden"
         style={{
           background: 'linear-gradient(180deg, #0d1520 0%, #0a0a0c 45%, #091409 100%)',
           userSelect: dragging ? 'none' : undefined,
-          cursor:     dragging ? 'row-resize' : undefined,
+          cursor:     dragging ? 'col-resize' : undefined,
         }}
       >
         {/* Cause ribbon (TRACE_CONTRACT_v2 slice 1) — top strip when a step declares a cause */}
@@ -106,99 +152,50 @@ export default function MemoryCanvas() {
           }}
         />
 
-        {/* Zone label — Stack */}
-        {showStack && (
-          <div className="absolute top-3 left-5 text-[9px] font-mono text-zinc-700 tracking-[0.18em] uppercase z-10 pointer-events-none">
-            Stack
+        {/* ── Memory column: stack frames (recursion stacks naturally) + inline heap ── */}
+        <div
+          data-tour="stack-zone"
+          className="flex flex-col px-5 pt-8 pb-3 relative z-10 min-h-0 flex-shrink-0"
+          style={{ width: `${memPct}%` }}
+        >
+          <div className="absolute top-3 left-5 text-[9px] font-mono text-zinc-700 tracking-[0.18em] uppercase pointer-events-none">
+            Memory
           </div>
-        )}
+          <StackZone />
+          <HeapInline />
+        </div>
 
-        {/* Zone label — Heap */}
-        {showHeap && (
+        {/* ── Draggable column divider ── */}
+        <div
+          className="relative z-20 flex-shrink-0 flex items-center justify-center"
+          style={{ width: 14, cursor: 'col-resize', marginLeft: -7, marginRight: -7 }}
+          onPointerDown={onDividerPointerDown}
+          onPointerMove={onDividerPointerMove}
+          onPointerUp={onDividerPointerUp}
+          onPointerCancel={onDividerPointerUp}
+        >
           <div
-            className="absolute left-5 text-[9px] font-mono text-zinc-700 tracking-[0.18em] uppercase z-10 pointer-events-none"
-            style={{ top: showStack ? `calc(${stackPct}% + 22px)` : '12px' }}
-          >
-            Heap
-          </div>
-        )}
+            className="absolute inset-y-0"
+            style={{
+              left: '50%',
+              borderLeft: `1px dashed ${dragging ? 'rgba(99,102,241,0.45)' : 'rgba(63,63,70,0.5)'}`,
+              transition: 'border-color 0.15s',
+            }}
+          />
+        </div>
 
-        {/* Stack zone */}
-        {showStack && (
-          <div
-            data-tour="stack-zone"
-            className="flex flex-col px-6 pt-8 pb-3 relative z-10 min-h-0 flex-shrink-0"
-            style={{ height: showHeap ? `${stackPct}%` : '100%' }}
-          >
-            <StackZone />
+        {/* ── Animation column: grids / graphs / trees / tries / segtrees ── */}
+        <div className="flex-1 min-w-0 flex flex-col relative">
+          <div className="absolute top-3 left-4 text-[9px] font-mono text-zinc-700 tracking-[0.18em] uppercase z-10 pointer-events-none">
+            Animation
           </div>
-        )}
-
-        {/* ── Draggable divider — only when both zones visible ── */}
-        {showStack && showHeap && (
-          <div
-            className="relative z-20 flex-shrink-0 flex items-center justify-center mx-6"
-            style={{ height: 20, cursor: 'row-resize', marginTop: -10, marginBottom: -10 }}
-            onPointerDown={onDividerPointerDown}
-            onPointerMove={onDividerPointerMove}
-            onPointerUp={onDividerPointerUp}
-            onPointerCancel={onDividerPointerUp}
-          >
-            <div
-              className="absolute inset-x-0"
-              style={{
-                top: '50%',
-                borderTop: `1px dashed ${dragging ? 'rgba(99,102,241,0.45)' : 'rgba(63,63,70,0.5)'}`,
-                transition: 'border-color 0.15s',
-              }}
-            />
-            <div
-              className="relative flex items-center gap-0.5 px-2 py-0.5 rounded-sm border transition-all duration-150"
-              style={{
-                background: dragging ? 'rgba(99,102,241,0.12)' : 'rgba(10,10,12,0.95)',
-                borderColor: dragging ? 'rgba(99,102,241,0.5)' : 'rgba(63,63,70,0.7)',
-              }}
-            >
-              <span
-                className="text-[9px] font-mono tracking-wide select-none transition-colors duration-150"
-                style={{ color: dragging ? 'rgba(129,140,248,0.9)' : 'rgba(82,82,91,0.9)' }}
-              >
-                memory boundary
-              </span>
-              <svg width="10" height="8" viewBox="0 0 10 8" className="ml-0.5 flex-shrink-0">
-                {[0, 3].map(cx =>
-                  [1, 4, 7].map(cy => (
-                    <circle
-                      key={`${cx}-${cy}`}
-                      cx={cx + 2} cy={cy}
-                      r={0.9}
-                      fill={dragging ? 'rgba(129,140,248,0.7)' : 'rgba(82,82,91,0.5)'}
-                    />
-                  )),
-                )}
-              </svg>
-            </div>
-          </div>
-        )}
-
-        {/* Heap zone */}
-        {showHeap && (
-          <div data-tour="heap-zone" className="flex-1 overflow-hidden px-6 pt-6 pb-4 relative z-10 flex flex-col min-h-0">
-            <HeapZone />
-          </div>
-        )}
-
-        {/* Empty state when both zones are hidden */}
-        {!showStack && !showHeap && (
-          <div className="flex-1 flex items-center justify-center">
-            <span className="text-zinc-700 text-xs font-mono">Enable Stack or Heap from the view bar above</span>
-          </div>
-        )}
+          <AnimationPanel />
+        </div>
 
         {/* Hint card — shown when a guided program hint exists for this step */}
         <HintCard hint={currentHint} />
 
-        {/* Arrow SVG overlay */}
+        {/* Arrow SVG overlay — spans both columns */}
         <ArrowLayer tick={tick} />
       </div>
     </RefRegistryContext.Provider>

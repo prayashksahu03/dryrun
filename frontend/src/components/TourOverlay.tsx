@@ -31,20 +31,14 @@ export const TOUR_STEPS: TourStep[] = [
   },
   {
     target: '[data-tour="stack-zone"]',
-    title: 'Stack Memory',
-    body: 'Stack frames push when a function is called and pop on return. Variables flash amber when their value changes mid-step.',
+    title: 'Memory',
+    body: 'Stack frames push when a function is called and pop on return — recursion stacks up right here. Variables flash amber when they change, and heap allocations appear inline below the stack when your code uses new/malloc.',
     placement: 'right',
   },
   {
-    target: '[data-tour="heap-zone"]',
-    title: 'Heap Memory',
-    body: 'Heap blocks appear on new/malloc with green borders. They turn red-striped when freed. Dangling pointer reads trigger a crash highlight.',
-    placement: 'right',
-  },
-  {
-    target: '[data-tour="inspector"]',
-    title: 'Inspector',
-    body: 'The current event, output log, call tree, and memory state — all synced to the exact step you\'re on. Toggle sections from the view bar above.',
+    target: '[data-tour="animation-zone"]',
+    title: 'Animation',
+    body: 'Your data structures, drawn live: arrays, graphs, grids, trees and tries animate here as your code builds and walks them. Crashes are explained here too.',
     placement: 'left',
   },
   {

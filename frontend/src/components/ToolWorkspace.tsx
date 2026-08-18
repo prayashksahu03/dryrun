@@ -3,9 +3,7 @@ import { useExecutionStore } from '../store/executionStore';
 import { useKeyboardNav } from '../hooks/useKeyboardNav';
 import CodePanel from './CodePanel';
 import MemoryCanvas from './MemoryCanvas';
-import InspectorPanel from './InspectorPanel';
 import TimelineBar from './TimelineBar';
-import PanelToggleBar from './PanelToggleBar';
 import AmbiguityPanel from './AmbiguityPanel';
 import ArtifactPanel from './ArtifactPanel';
 import TutorConversation from './TutorConversation';
@@ -69,7 +67,6 @@ export default function ToolWorkspace() {
   useKeyboardNav();
 
   const [codePct, setCodePct]           = useState(34);
-  const [inspectorPct, setInspectorPct] = useState(22);
   const [aiLeftPct, setAiLeftPct]       = useState(48);  // left share in AI modes (chat / code)
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -84,9 +81,6 @@ export default function ToolWorkspace() {
 
   return (
     <>
-      {/* Views bar governs the memory panels — Debug mode only */}
-      {appMode === 'debug' && <PanelToggleBar />}
-
       {/* Main area — swaps by mode */}
       <div ref={containerRef} className="flex flex-1 overflow-hidden">
 
@@ -100,16 +94,8 @@ export default function ToolWorkspace() {
               const delta = (dx / totalWidth()) * 100;
               setCodePct(p => Math.min(Math.max(p + delta, 15), 55));
             }} />
-            {/* Memory canvas — flex-1 fills remaining space */}
+            {/* Memory + Animation — one canvas, two columns, fills remaining space */}
             <MemoryCanvas />
-            <ColDivider onDrag={dx => {
-              const delta = (dx / totalWidth()) * 100;
-              setInspectorPct(p => Math.min(Math.max(p - delta, 12), 45));
-            }} />
-            {/* Inspector panel */}
-            <div style={{ width: `${inspectorPct}%` }} className="flex-shrink-0 flex flex-col overflow-hidden">
-              <InspectorPanel />
-            </div>
           </>
         )}
 
