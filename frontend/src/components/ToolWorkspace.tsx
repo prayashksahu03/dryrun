@@ -66,8 +66,9 @@ export default function ToolWorkspace() {
   useKeyboardNav();
 
   const [codePct, setCodePct]           = useState(34);
-  const [aiLeftPct, setAiLeftPct]       = useState(48);  // interview: code's share on the left
-  const [tutorChatPct, setTutorChatPct] = useState(30);  // tutor: conversation's share on the right
+  const [aiLeftPct, setAiLeftPct]       = useState(48);  // interview (2-col): code's share on the left
+  const [tutorChatPct, setTutorChatPct] = useState(30);  // tutor/interview (3-col): conversation's share on the right
+  const [interviewAnim, setInterviewAnim] = useState(false); // interview: bring the animation into the middle
   const containerRef = useRef<HTMLDivElement>(null);
 
   const totalWidth = () => containerRef.current?.getBoundingClientRect().width ?? 1;
@@ -82,7 +83,7 @@ export default function ToolWorkspace() {
   return (
     <>
       {/* Main area — swaps by mode */}
-      <div ref={containerRef} className="flex flex-1 overflow-hidden">
+      <div ref={containerRef} className="flex flex-1 overflow-hidden relative">
 
         {appMode === 'debug' && (
           <>
@@ -121,19 +122,55 @@ export default function ToolWorkspace() {
           </>
         )}
 
-        {/* Interview: no animation — just the code and the interview chat. */}
+        {/* Interview: code left, interview chat right. An "animation" toggle at
+            the top slides the memory/animation canvas into the middle. */}
         {appMode === 'interview' && (
           <>
-            <div style={{ width: `${aiLeftPct}%` }} className="flex-shrink-0 flex flex-col overflow-hidden">
-              <CodePanel readOnly />
-            </div>
-            <ColDivider onDrag={dx => {
-              const delta = (dx / totalWidth()) * 100;
-              setAiLeftPct(p => Math.min(Math.max(p + delta, 30), 65));
-            }} />
-            <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-              <InterviewConversation />
-            </div>
+            {interviewAnim ? (
+              <>
+                <div style={{ width: `${codePct}%` }} className="flex-shrink-0 flex flex-col overflow-hidden">
+                  <CodePanel readOnly />
+                </div>
+                <ColDivider onDrag={dx => {
+                  const delta = (dx / totalWidth()) * 100;
+                  setCodePct(p => Math.min(Math.max(p + delta, 15), 45));
+                }} />
+                <MemoryCanvas />
+                <ColDivider onDrag={dx => {
+                  const delta = (dx / totalWidth()) * 100;
+                  setTutorChatPct(p => Math.min(Math.max(p - delta, 22), 48));
+                }} />
+                <div style={{ width: `${tutorChatPct}%` }} className="flex-shrink-0 flex flex-col overflow-hidden">
+                  <InterviewConversation />
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ width: `${aiLeftPct}%` }} className="flex-shrink-0 flex flex-col overflow-hidden">
+                  <CodePanel readOnly />
+                </div>
+                <ColDivider onDrag={dx => {
+                  const delta = (dx / totalWidth()) * 100;
+                  setAiLeftPct(p => Math.min(Math.max(p + delta, 30), 65));
+                }} />
+                <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+                  <InterviewConversation />
+                </div>
+              </>
+            )}
+            {/* Animation toggle — top-center chip */}
+            <button
+              onClick={() => setInterviewAnim(v => !v)}
+              title={interviewAnim ? 'Hide animation' : 'Show animation'}
+              className={[
+                'absolute top-2 left-1/2 -translate-x-1/2 z-30 h-6 px-2.5 rounded-full text-[10px] font-mono transition-colors border',
+                interviewAnim
+                  ? 'bg-violet-500/20 text-violet-200 border-violet-500/30'
+                  : 'bg-zinc-900/80 text-zinc-500 border-zinc-700/60 hover:text-zinc-200 hover:border-zinc-600',
+              ].join(' ')}
+            >
+              ◇ animation
+            </button>
           </>
         )}
 
