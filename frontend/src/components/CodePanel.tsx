@@ -98,6 +98,7 @@ function EditorMode({ readOnly = false }: { readOnly?: boolean }) {
     editorSource, setEditorSource, stdinInput, setStdinInput,
     runCode, isLoading, error, language,
     trace, currentFrame, clearTrace, reportIssue,
+    convertLoading, convertError, preConvertSource, convertCode, restoreOriginal,
   } = useExecutionStore();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const activeLineRef = useRef<HTMLDivElement>(null);
@@ -353,6 +354,35 @@ function EditorMode({ readOnly = false }: { readOnly?: boolean }) {
           <div className="px-3 py-2.5 max-h-32 overflow-y-auto">
             <pre className={`text-[10px] font-mono whitespace-pre-wrap leading-relaxed ${softError ? 'text-amber-200/90' : 'text-red-300/90'}`}>{error}</pre>
           </div>
+          {/* Convert-for-DryRun: the LLM rewrites the program into the supported
+              subset — same behavior, tracer-friendly constructs. */}
+          {language === 'cpp' && (
+            <div className={`flex items-center gap-2 px-3 py-2 border-t ${softError ? 'border-amber-500/20' : 'border-red-500/20'}`}>
+              <button
+                onClick={convertCode}
+                disabled={convertLoading}
+                className="h-6 px-2.5 rounded text-[10px] font-mono bg-violet-500/20 text-violet-200 border border-violet-500/30 hover:bg-violet-500/30 transition-colors disabled:opacity-50"
+              >
+                {convertLoading ? 'converting…' : '⚡ Convert for DryRun'}
+              </button>
+              <span className="text-[9px] font-mono text-zinc-600">
+                AI rewrites this into constructs DryRun can trace — same behavior
+              </span>
+              {convertError && (
+                <span className="ml-auto text-[9px] font-mono text-red-400/80 truncate max-w-[40%]">{convertError}</span>
+              )}
+            </div>
+          )}
+        </div>
+      ) : preConvertSource !== null ? (
+        <div className="flex items-center gap-2 px-3 py-2 border-t border-violet-500/30 bg-violet-500/5 text-[10px] font-mono flex-shrink-0">
+          <span className="text-violet-300">⚡ converted for DryRun — run it</span>
+          <button
+            onClick={restoreOriginal}
+            className="ml-auto text-zinc-500 hover:text-zinc-200 underline decoration-dotted transition-colors"
+          >
+            restore original
+          </button>
         </div>
       ) : (
         <div className="px-3 py-2 border-t border-zinc-800/60 bg-zinc-900/30 text-[10px] font-mono text-zinc-600 flex-shrink-0">

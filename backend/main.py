@@ -615,6 +615,97 @@ async def interview(req: InterviewRequest):
     return InterviewResponse(message=text, model=EXPLAIN_MODEL)
 
 
+# ── Convert: rewrite unsupported C++ into the DryRun-supported subset ─────────
+# The escape hatch, turned into a feature: when the interpreter can't trace a
+# program, the LLM rewrites it into semantically identical code using only
+# constructs the tracer handles. The style contract below is empirical — derived
+# from what demonstrably traces (demos, guided programs) and what demonstrably
+# fails (competitive-style macro/tuple-heavy code).
+
+CONVERT_SYSTEM = (
+    "You rewrite C++ programs into a restricted, tracer-friendly subset WITHOUT changing behavior.\n"
+    "The rewritten program MUST be semantically identical: same algorithm, same hardcoded data, "
+    "same output, same complexity. Keep the author's variable and function names wherever legal.\n"
+    "\n"
+    "REWRITE RULES (the supported subset):\n"
+    "- No #define macros. Replace macro types with plain types (write long long explicitly, or a typedef).\n"
+    "- No C-style arrays of containers (e.g. vector<pair<int,int>> adj[n+1]) — use "
+    "vector<vector<...>> name(n+1) instead.\n"
+    "- No std::tuple, no std::array, no structured bindings (auto [a,b,c]), no std::tie, and no "
+    "custom structs as container element types. Inside containers, pair is the ONLY compound "
+    "element type allowed.\n"
+    "- Multi-field rows (edge lists, triples) become PARALLEL plain vectors, e.g.:\n"
+    "  vector<int> from; vector<int> to; vector<int> weight;\n"
+    "  from.push_back(1); to.push_back(2); weight.push_back(4);\n"
+    "- No brace-initialized container literals for complex element types "
+    "(vector<tuple<...>> v = {{...}}) — build with sequential push_back calls.\n"
+    "- Prefer indexed for-loops (for (int i = 0; i < v.size(); i++)) over range-for with auto "
+    "when iterating containers of pairs.\n"
+    "- No INT64_MAX / LLONG_MAX / INT_MAX macros — use an explicit literal constant "
+    "(e.g. const long long INF = 1000000000000000LL;).\n"
+    "- Allowed and encouraged: vector, pair, map, set, queue, stack, priority_queue "
+    "(including greater<> min-heaps), string, plain functions with reference parameters, "
+    "if/while/for, cout/cin, new/delete, structs with simple fields.\n"
+    "- Keep #include <bits/stdc++.h> and using namespace std; as-is.\n"
+    "- int main() is required.\n"
+    "- Keep the program a single file and roughly the same length — this is a translation, "
+    "not a refactor.\n"
+    "\n"
+    "Return ONLY the complete rewritten C++ source code. No markdown fences, no commentary."
+)
+
+
+class ConvertRequest(BaseModel):
+    source: str
+    language: str = 'cpp'
+    error: str = ''      # the tracer's failure message — tells the LLM what broke
+
+
+class ConvertResponse(BaseModel):
+    code: str
+    model: str
+
+
+def _strip_code_fences(text: str) -> str:
+    t = text.strip()
+    if t.startswith('```'):
+        first_nl = t.find('\n')
+        if first_nl != -1:
+            t = t[first_nl + 1:]
+        if t.rstrip().endswith('```'):
+            t = t.rstrip()[:-3]
+    return t.strip()
+
+
+@app.post("/convert", response_model=ConvertResponse)
+async def convert(req: ConvertRequest):
+    if not req.source.strip():
+        raise HTTPException(status_code=400, detail="No source code provided.")
+    if len(req.source) > 12000:
+        raise HTTPException(status_code=400, detail="Source code too long (max 12000 chars).")
+    client = _get_explain_client()
+    if client is None:
+        raise HTTPException(status_code=503, detail="Convert is unavailable — the LLM client isn't installed.")
+
+    user = "Rewrite this program into the supported subset:\n```cpp\n" + req.source + "\n```"
+    if req.error.strip():
+        user += "\n\nThe tracer failed with:\n" + req.error.strip()[:600] + \
+                "\nMake sure the rewrite avoids whatever caused that."
+
+    messages = [
+        {"role": "system", "content": CONVERT_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+    try:
+        text = _chat(client, messages, max_tokens=4000, temperature=0.2)
+    except Exception as e:
+        raise _llm_http_error(e)
+    code = _strip_code_fences(text or '')
+    if not code or 'main' not in code:
+        raise HTTPException(status_code=502, detail="Conversion came back empty or invalid. Try again.")
+    return ConvertResponse(code=code, model=EXPLAIN_MODEL)
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}

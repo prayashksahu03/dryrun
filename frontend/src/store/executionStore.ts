@@ -255,6 +255,14 @@ interface ExecutionStore {
   setEditorSource: (src: string) => void;
   setStdinInput: (input: string) => void;
   setLanguage: (lang: Language) => void;
+
+  // Convert-for-DryRun: when the tracer can't handle the code, the LLM rewrites
+  // it into the supported subset. The original is kept for one-click restore.
+  convertLoading: boolean;
+  convertError: string | null;
+  preConvertSource: string | null;
+  convertCode: () => Promise<void>;
+  restoreOriginal: () => void;
   runCode: () => Promise<void>;
   reportIssue: (note?: string) => Promise<boolean>;
   clearTrace: () => void;
@@ -360,6 +368,41 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
   }),
   setStdinInput: (input) => set({ stdinInput: input }),
   setLanguage: (lang) => set({ language: lang, error: null }),
+
+  convertLoading: false,
+  convertError: null,
+  preConvertSource: null,
+  convertCode: async () => {
+    const { editorSource, language, error } = get();
+    if (!editorSource.trim()) return;
+    set({ convertLoading: true, convertError: null });
+    try {
+      const res = await fetch(`${BACKEND}/convert`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: editorSource, language, error: error ?? '' }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: `Server error ${res.status}` }));
+        throw new Error(err.detail ?? `Server error ${res.status}`);
+      }
+      const data = await res.json();
+      set({
+        convertLoading: false,
+        preConvertSource: editorSource,       // keep the original for restore
+        editorSource: data.code as string,
+        error: null,                          // clear the old failure; user re-runs
+        trace: null,
+      });
+    } catch (e) {
+      set({ convertLoading: false, convertError: e instanceof Error ? e.message : String(e) });
+    }
+  },
+  restoreOriginal: () => {
+    const { preConvertSource } = get();
+    if (preConvertSource === null) return;
+    set({ editorSource: preConvertSource, preConvertSource: null, error: null, trace: null });
+  },
 
   clearTrace: () =>
     set(s => ({
