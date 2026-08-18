@@ -7,7 +7,6 @@ import HeapBlockComponent from './heap/HeapBlock';
 import AnimationPanel, { heapClaimedByAnimation } from './AnimationPanel';
 import ArrowLayer from './arrows/ArrowLayer';
 import HintCard from './HintCard';
-import CauseRibbon from './CauseRibbon';
 import { getVisualIdentity } from '../utils/visualIdentity';
 import { resolveHints } from '../data/guided';
 
@@ -75,10 +74,6 @@ export default function MemoryCanvas() {
   );
   const currentHint = resolvedHints.get(currentStep);
 
-  // TRACE_CONTRACT_v2 slice 1: render the emitted causal chain, if any, 1:1.
-  const _frame = trace ? trace.steps[currentStep] : null;
-  const cause = _frame && _frame.event.type === 'assign' ? _frame.event.cause : undefined;
-
   const [tick, setTick]       = useState(0);
   const [memPct, setMemPct]   = useState(DEFAULT_PCT);
   const [dragging, setDragging] = useState(false);
@@ -140,9 +135,6 @@ export default function MemoryCanvas() {
           cursor:     dragging ? 'col-resize' : undefined,
         }}
       >
-        {/* Cause ribbon (TRACE_CONTRACT_v2 slice 1) — top strip when a step declares a cause */}
-        {cause && <CauseRibbon cause={cause} />}
-
         {/* Dot grid */}
         <div
           className="absolute inset-0 pointer-events-none"
