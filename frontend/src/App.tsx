@@ -10,7 +10,7 @@ import ToolWorkspace from './components/ToolWorkspace';
 // ── App ───────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const { trace, currentStep, currentFrame, activeGuidedProgram, appMode } = useExecutionStore();
+  const { trace, currentStep, currentFrame, activeGuidedProgram, appMode, setAppMode } = useExecutionStore();
 
   const frame = currentFrame();
   const isCrash = frame?.event.type === 'crash';
@@ -41,9 +41,29 @@ export default function App() {
             <Menu size={18} />
           </button>
           <Link to="/" className="text-violet-400 font-mono font-semibold text-sm tracking-tight hover:text-violet-300 transition-colors" title="Home">◈ DryRun</Link>
-          <span className="hidden sm:inline text-[10px] font-mono capitalize px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300 border border-violet-500/25">
-            {appMode}
-          </span>
+          {/* Mode tabs — Debug / Tutor / Interview (the drawer keeps navigation) */}
+          <nav className="flex items-center gap-1 ml-1">
+            {(['debug', 'tutor', 'interview'] as const).map(m => {
+              const disabled = m !== 'debug' && !trace;
+              return (
+                <button
+                  key={m}
+                  disabled={disabled}
+                  onClick={() => setAppMode(m)}
+                  title={disabled ? 'Run a program first' : ''}
+                  className={[
+                    'h-7 px-2.5 rounded text-[11px] font-mono capitalize transition-colors border',
+                    appMode === m
+                      ? 'bg-violet-500/20 text-violet-200 border-violet-500/30'
+                      : 'text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 border-transparent',
+                    disabled ? 'opacity-40 cursor-not-allowed hover:bg-transparent hover:text-zinc-500' : '',
+                  ].join(' ')}
+                >
+                  {m}
+                </button>
+              );
+            })}
+          </nav>
           <span className="text-zinc-700 hidden md:inline">│</span>
           <span className="hidden md:inline text-zinc-500 text-xs font-mono truncate max-w-xs">
             {activeGuidedProgram ? activeGuidedProgram.title : trace ? trace.name : 'Write your program'}
