@@ -75,6 +75,8 @@ namespace std {
     void pop_back();
     void resize(int);
     void resize(int, T const&);
+    void assign(int n, T const& v);
+    template<typename It> void assign(It first, It last);
     T& back(); T const& back() const;
     T& front(); T const& front() const;
     T& operator[](int);
@@ -105,6 +107,7 @@ namespace std {
     void push_back(T const&); void push_front(T const&);
     void pop_back(); void pop_front();
     T& front(); T& back();
+    void assign(int n, T const& v);
     bool empty() const; int size() const;
     T& operator[](int);
     iterator begin(); iterator end();
@@ -212,6 +215,7 @@ namespace std {
     void push_back(char); void pop_back();
     string substr(int pos, int len) const; string substr(int pos) const;
     int find(char const*) const; int find(string const&) const; int find(char) const;
+    string& assign(string const&); string& assign(char const*); string& assign(int n, char c);
     string& erase(int pos, int len); string& erase(int pos);
     string& insert(int pos, string const&); string& insert(int pos, char const*);
     string operator+(string const&) const; string operator+(char const*) const;
@@ -548,8 +552,10 @@ class CppInterpreter:
                     self._collect_class(child)
             elif k == CK.NAMESPACE:
                 self._collect_toplevel(child)
-            elif k == CK.STRUCT_DECL and child.is_definition():
-                # Only user-defined structs (not stub declarations)
+            elif k in (CK.STRUCT_DECL, CK.UNION_DECL) and child.is_definition():
+                # Only user-defined structs (not stub declarations). Unions are modelled
+                # as structs — overlapping storage is not simulated, but that is far
+                # closer than the plain int a union variable used to decay into.
                 if child.location.line > self._line_offset:
                     self._collect_class(child)
             elif k == CK.TYPEDEF_DECL and child.location.line > self._line_offset:
@@ -609,6 +615,20 @@ class CppInterpreter:
             elif ck in (CK.CLASS_DECL, CK.STRUCT_DECL) and child.is_definition():
                 self._collect_class(child)
         self.class_defs[name] = cd
+
+    def _register_class(self, cursor):
+        """Collect a class/struct/union discovered AFTER Memory was constructed.
+
+        Memory got its struct_defs snapshot at startup from the top-level sweep, so a
+        function-local type has to be pushed into it too or sizeof/heap layout would
+        not know the type exists.
+        """
+        self._collect_class(cursor)
+        cd = self.class_defs.get(cursor.spelling)
+        if cd is not None and self.memory is not None:
+            self.memory.struct_defs[cursor.spelling] = {
+                f: self._simple_type(t) for f, t in cd['fields'].items()
+            }
 
     def _collect_enum(self, cursor):
         """Register enum constants so DECL_REF_EXPR can resolve them."""
@@ -675,7 +695,13 @@ class CppInterpreter:
         k = cursor.kind
         if   k == CK.DECL_STMT:
             for c in self._ch(cursor):
-                if c.kind == CK.VAR_DECL:
+                # A struct/class/union defined INSIDE a function body is only ever
+                # visible here — _collect_toplevel never descends into bodies — and it
+                # precedes its own declarators, so register it before they execute.
+                if (c.kind in (CK.STRUCT_DECL, CK.CLASS_DECL, CK.UNION_DECL)
+                        and c.is_definition() and c.spelling):
+                    self._register_class(c)
+                elif c.kind == CK.VAR_DECL:
                     self._exec_decl(c)
                 elif c.kind == CK.UNEXPOSED_DECL:
                     self._exec_structured_binding(c)
@@ -766,7 +792,12 @@ class CppInterpreter:
                 type_spell = canon
         except Exception:
             pass
-        children   = self._ch(cursor)
+        # `struct S { … } g;` hangs the whole STRUCT_DECL off the VAR_DECL as a child.
+        # It describes the TYPE, not an initialiser — every branch below treats
+        # children as initialiser candidates, so drop type definitions up front.
+        children   = [c for c in self._ch(cursor)
+                      if c.kind not in (CK.STRUCT_DECL, CK.CLASS_DECL,
+                                        CK.UNION_DECL, CK.ENUM_DECL)]
 
         # ── lvalue reference variable: int& r = a ──
         if '&' in type_spell and '&&' not in type_spell and '*' not in type_spell:
@@ -5260,6 +5291,40 @@ class CppInterpreter:
                     return result
         return []
 
+    def _assign_values(self, args: list) -> list:
+        """New element list for a vector-like container's assign(...) overload.
+
+        Shared by every vector-like dispatcher so the call sites cannot drift
+        apart on the one detail that actually bites: assign(n, v) must hand out n
+        INDEPENDENT copies. Storing the same dict n times would make
+        `t.assign(3, vector<int>()); t[1].push_back(7)` show that 7 in t[0] and
+        t[2] as well — a wrong answer the user has no way to spot.
+        """
+        a0 = args[0] if args else None
+        a1 = args[1] if len(args) > 1 else None
+
+        # assign(first, last) — copy an iterator range.
+        if (isinstance(a0, dict) and a0.get('kind') == 'iterator' and
+                isinstance(a1, dict) and a1.get('kind') == 'iterator'):
+            data = a0.get('data', [])
+            beg  = a0.get('idx') or 0
+            end  = a1.get('idx')
+            return copy.deepcopy(list(data[beg:len(data) if end is None else end]))
+
+        # assign(count, value)
+        if a1 is not None:
+            n = self._to_int(a0)
+            # Scalars are stored as plain ints, matching what push_back/resize put in
+            # the list, so the frontend still sees a homogeneous number[].
+            proto = (a1 if isinstance(a1, dict) and a1.get('kind') in ('struct', 'array')
+                     else self._to_int(a1))
+            return [copy.deepcopy(proto) for _ in range(max(0, n))]
+
+        # assign({...}) — an initialiser list arrives already evaluated as an array.
+        if isinstance(a0, dict) and a0.get('kind') == 'array':
+            return copy.deepcopy(list(a0.get('values', [])))
+        return []
+
     def _call_vector_method(self, obj_name: str, obj_c,
                             method_name: str, args: list, line: int) -> dict:
         # Resolve array value (local var or this-field).
@@ -5322,6 +5387,23 @@ class CppInterpreter:
             shape = f'[{n}]'
             self._emit(line, f'{real_name}.resize({n}).',
                        {'type': 'assign', 'target': real_name, 'value': shape})
+            return _INT(0)
+
+        # assign REPLACES the contents — it is not resize and it is not append, so
+        # it must also SHRINK. Falling through to the _INT(0) tail (as this used to)
+        # left the vector at its old contents while the program read on happily.
+        if method_name == 'assign':
+            arr['values'] = self._assign_values(args)
+            # A wholesale replacement makes the old write-highlight and any 2-D
+            # shape metadata describe memory that no longer exists.
+            arr.pop('lastWrite', None)
+            arr.pop('rows', None)
+            arr.pop('cols', None)
+            save()
+            self.memory.update_line(line)
+            n_new = len(arr['values'])
+            self._emit(line, f'{real_name}.assign({n_new} element(s)).',
+                       {'type': 'assign', 'target': real_name, 'value': f'[{n_new}]'})
             return _INT(0)
 
         if method_name == 'back':
@@ -5424,6 +5506,14 @@ class CppInterpreter:
                 inner['values'] = []
                 _persist()
                 return _INT(0)
+            if method_name == 'assign':
+                inner['values'] = self._assign_values(args)
+                inner.pop('lastWrite', None)
+                _persist()
+                self._emit(line, f'{real_name}[{mkey}].assign({len(inner["values"])} element(s)).',
+                           {'type': 'assign', 'target': f'{real_name}[{mkey}]',
+                            'value': f'[{len(inner["values"])}]'})
+                return _INT(0)
             if method_name == 'size':
                 return _INT(len(inner_vals))
             if method_name == 'empty':
@@ -5462,6 +5552,23 @@ class CppInterpreter:
             self.memory.update_line(line)
             self._emit(line, f"{real_name}[{idx}].push_back({self._fmt(stored)}).",
                        {'type': 'assign', 'target': f'{real_name}[{idx}]', 'value': self._fmt(stored)})
+            return _INT(0)
+
+        # adj[u].assign(n, v) — same replace-the-contents contract as the plain
+        # vector path, just persisted through the enclosing outer array.
+        if method_name in ('assign', 'clear'):
+            inner['values'] = [] if method_name == 'clear' else self._assign_values(args)
+            inner.pop('lastWrite', None)
+            vals[idx] = inner
+            outer_arr['values'] = vals
+            if is_this:
+                self._write_this_field(real_name, outer_arr, line)
+            elif real_name:
+                self.memory.set_var(real_name, outer_arr)
+            self.memory.update_line(line)
+            n_new = len(inner['values'])
+            self._emit(line, f'{real_name}[{idx}].{method_name}({n_new} element(s)).',
+                       {'type': 'assign', 'target': f'{real_name}[{idx}]', 'value': f'[{n_new}]'})
             return _INT(0)
 
         if method_name == 'size':
@@ -5516,8 +5623,9 @@ class CppInterpreter:
             self._emit(line, f"{real_name}[{idx}].push_back({self._fmt(stored)}).",
                        {'type': 'assign', 'target': f'{real_name}[{idx}]', 'value': self._fmt(stored)})
             return _INT(0)
-        if method_name == 'clear':
-            inner['values'] = []
+        if method_name in ('clear', 'assign'):
+            inner['values'] = [] if method_name == 'clear' else self._assign_values(args)
+            inner.pop('lastWrite', None)
             vals[idx] = inner
             outer_arr['values'] = vals
             self._put_array(arr_name, arr_c, outer_arr, line)
@@ -5870,6 +5978,19 @@ class CppInterpreter:
                            f"to it (#14). Active iterator '{self._iter_sources[real_name]}' is now dangling.")
             return _INT(0)
 
+        # Only deque is vector-like enough to have assign(); queue/stack/priority_queue
+        # have no such member, but routing them here is harmless — the alternative was
+        # the silent _INT(0) tail that left the container untouched.
+        if method_name == 'assign':
+            col['values'] = self._assign_values(args)
+            col.pop('lastWrite', None)
+            save()
+            self.memory.update_line(line)
+            n_new = len(col['values'])
+            self._emit(line, f'{real_name}.assign({n_new} element(s)).',
+                       {'type': 'assign', 'target': real_name, 'value': f'[{n_new}]'})
+            return _INT(0)
+
         if method_name == 'push_front':
             raw    = args[0] if args else _INT(0)
             stored = (raw if isinstance(raw, dict) and raw.get('kind') in ('struct', 'array')
@@ -6207,6 +6328,25 @@ class CppInterpreter:
         if method_name == 'clear':
             save('')
             return _INT(0)
+        # string::assign replaces the whole string. Its (count, char) overload fills
+        # with a REPEATED CHARACTER — not with a count of elements like a vector's,
+        # so it deliberately does not share _assign_values.
+        if method_name == 'assign':
+            a0 = args[0] if args else None
+            if isinstance(a0, dict) and a0.get('kind') == 'char':
+                src = a0.get('value', '')
+                # assign(str, pos, len) — the substring overload.
+                if len(args) >= 3:
+                    pos, ln = self._to_int(args[1]), self._to_int(args[2])
+                    src = src[pos:pos + ln]
+                save(src)
+            elif len(args) >= 2:
+                n  = self._to_int(a0)
+                ch = args[1].get('value', '')[:1] if isinstance(args[1], dict) else ''
+                save(ch * max(0, n))
+            else:
+                save('')
+            return _INT(0)
         if method_name == 'back':
             return {'kind': 'char', 'value': s[-1]} if s else {'kind': 'char', 'value': ''}
         if method_name == 'front':
@@ -6534,6 +6674,10 @@ class CppInterpreter:
         s = (type_spell
              .replace('const ', '').replace('volatile ', '')
              .replace('*', '').replace('&', '').strip())
+        # libclang spells the type of a declarator written inline with its definition
+        # (`struct S { … } g;`) as the ELABORATED "struct S", never bare "S". Without
+        # this the name misses class_defs and the object degrades to a plain int.
+        s = re.sub(r'^(struct|class|union|enum)\s+', '', s)
         # Strip array dimensions: "Student [3]" → "Student", "int [3][3]" → "int"
         bracket = s.find('[')
         if bracket != -1:
