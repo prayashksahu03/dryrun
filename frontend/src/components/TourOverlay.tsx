@@ -44,7 +44,7 @@ export const TOUR_STEPS: TourStep[] = [
   {
     target: '[data-tour="menu"]',
     title: 'The menu',
-    body: 'Open this to switch modes — Debug (this memory view), Tutor (an AI that explains any step & walks you through the code, grounded in the real trace), and Interview (a mock interviewer on your code) — plus Learn lessons, the tour, and feedback.',
+    body: 'Home, Learn lessons, this tour, and feedback live here. Switch modes with the tabs beside the logo — Debug (this memory view), Tutor (an AI that explains any step, grounded in the real trace), and Interview (a mock interviewer on your code).',
     placement: 'right',
   },
 ];
