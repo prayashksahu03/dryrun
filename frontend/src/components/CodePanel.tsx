@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState } from 'react';
+import { useRef, useEffect, useState, useMemo } from 'react';
 import { useExecutionStore, Language } from '../store/executionStore';
 import { useFeedbackGate } from '../hooks/useFeedbackGate';
 import FeedbackGateModal from './FeedbackGateModal';
@@ -45,6 +45,24 @@ function highlight(raw: string, lang: Language): string {
   }
 
   return s;
+}
+
+// ── Risky-construct scan ──────────────────────────────────────────────
+// Constructs the tracer accepts but SILENTLY mis-executes (zero-initialized
+// containers, skipped loops → wrong values). A trace that lies is worse than
+// an error, so these get a proactive convert offer even when the run "works".
+const RISKY_PATTERNS: { re: RegExp; label: string }[] = [
+  { re: /#define\s+\w+\s+(?:long|unsigned|int|double|float|short|char)\b/, label: 'type #defines' },
+  { re: /\btuple\s*</,  label: 'std::tuple' },
+  { re: /\bauto\s*\[/,  label: 'structured bindings' },
+  { re: /\barray\s*</,  label: 'std::array' },
+  { re: /\bvector\s*<[^;{}()]*>\s+\w+\s*\[/, label: 'C-style arrays of containers' },
+  { re: /\b(?:INT64_MAX|INT64_MIN|LLONG_MAX|LLONG_MIN)\b/, label: 'INT64/LLONG macros' },
+  { re: /=\s*\{\s*\{/,  label: 'brace-initialized container literals' },
+];
+
+function detectRiskyConstructs(src: string): string[] {
+  return RISKY_PATTERNS.filter(p => p.re.test(src)).map(p => p.label);
 }
 
 // ── Error parsing ─────────────────────────────────────────────────────
@@ -113,6 +131,12 @@ function EditorMode({ readOnly = false }: { readOnly?: boolean }) {
   };
   const errorLine   = error ? parseErrorLine(error) : null;
   const errorType   = error ? parseErrorType(error) : null;
+  // Proactive scan: constructs the tracer silently mishandles get a convert
+  // offer even when the run "succeeds" — a wrong trace must never pass quietly.
+  const risky = useMemo(
+    () => (language === 'cpp' && preConvertSource === null ? detectRiskyConstructs(editorSource) : []),
+    [editorSource, language, preConvertSource],
+  );
   // A coverage-gap ("Not Supported Yet") is shown in a calm amber, not alarming red.
   const softError   = errorType === 'Not Supported Yet';
 
@@ -323,6 +347,30 @@ function EditorMode({ readOnly = false }: { readOnly?: boolean }) {
 
       {/* Feedback gate modal */}
       {gateOpen && <FeedbackGateModal onSubmitted={onFeedbackSubmitted} />}
+
+      {/* Risky-construct strip — shows in EVERY state except an error banner
+          (which carries its own convert button). A silently-wrong trace is the
+          whole reason this exists, so it must show over a "successful" run too. */}
+      {risky.length > 0 && !error && (
+        <div className="border-t border-amber-500/30 bg-[#12100a] flex-shrink-0">
+          <div className="flex items-center gap-2 px-3 py-2">
+            <span className="flex-shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold bg-amber-500/20 border border-amber-500/50 text-amber-400">!</span>
+            <span className="text-[10px] font-mono text-amber-200/90 truncate">
+              DryRun may trace this wrong: {risky.join(', ')}
+            </span>
+            <button
+              onClick={convertCode}
+              disabled={convertLoading}
+              className="ml-auto flex-shrink-0 h-6 px-2.5 rounded text-[10px] font-mono bg-violet-500/20 text-violet-200 border border-violet-500/30 hover:bg-violet-500/30 transition-colors disabled:opacity-50"
+            >
+              {convertLoading ? 'converting…' : '⚡ Convert for DryRun'}
+            </button>
+          </div>
+          {convertError && (
+            <div className="px-3 pb-2 text-[9px] font-mono text-red-400/80">{convertError}</div>
+          )}
+        </div>
+      )}
 
       {/* Bottom bar: frame description (trace) | error | hint */}
       {trace ? (
