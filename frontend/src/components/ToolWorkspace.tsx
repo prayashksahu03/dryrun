@@ -5,7 +5,6 @@ import CodePanel from './CodePanel';
 import MemoryCanvas from './MemoryCanvas';
 import TimelineBar from './TimelineBar';
 import AmbiguityPanel from './AmbiguityPanel';
-import ArtifactPanel from './ArtifactPanel';
 import TutorConversation from './TutorConversation';
 import InterviewConversation from './InterviewConversation';
 
@@ -67,7 +66,8 @@ export default function ToolWorkspace() {
   useKeyboardNav();
 
   const [codePct, setCodePct]           = useState(34);
-  const [aiLeftPct, setAiLeftPct]       = useState(48);  // left share in AI modes (chat / code)
+  const [aiLeftPct, setAiLeftPct]       = useState(48);  // interview: code's share on the left
+  const [tutorChatPct, setTutorChatPct] = useState(30);  // tutor: conversation's share on the right
   const containerRef = useRef<HTMLDivElement>(null);
 
   const totalWidth = () => containerRef.current?.getBoundingClientRect().width ?? 1;
@@ -99,19 +99,24 @@ export default function ToolWorkspace() {
           </>
         )}
 
-        {/* Tutor: conversation is the hero (left); the live artifact (Animation |
-            Code tabs) is on the right. */}
+        {/* Tutor: three sections — code (always visible), the live animation in
+            the middle, and the conversation on the right. */}
         {appMode === 'tutor' && (
           <>
-            <div style={{ width: `${aiLeftPct}%` }} className="flex-shrink-0 flex flex-col overflow-hidden">
-              <TutorConversation />
+            <div style={{ width: `${codePct}%` }} className="flex-shrink-0 flex flex-col overflow-hidden">
+              <CodePanel readOnly />
             </div>
             <ColDivider onDrag={dx => {
               const delta = (dx / totalWidth()) * 100;
-              setAiLeftPct(p => Math.min(Math.max(p + delta, 30), 65));
+              setCodePct(p => Math.min(Math.max(p + delta, 15), 45));
             }} />
-            <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-              <ArtifactPanel />
+            <MemoryCanvas />
+            <ColDivider onDrag={dx => {
+              const delta = (dx / totalWidth()) * 100;
+              setTutorChatPct(p => Math.min(Math.max(p - delta, 22), 48));
+            }} />
+            <div style={{ width: `${tutorChatPct}%` }} className="flex-shrink-0 flex flex-col overflow-hidden">
+              <TutorConversation />
             </div>
           </>
         )}
