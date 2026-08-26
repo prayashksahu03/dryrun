@@ -68,7 +68,10 @@ namespace std {
     typedef iterator const_iterator;
     vector(); vector(int n); vector(int n, T const& v);
     vector(initializer_list<T>);
+    template<typename It> vector(It first, It last);
     void push_back(T const&);
+    template<typename... A> void emplace_back(A&&... a);
+    template<typename... A> iterator emplace(iterator pos, A&&... a);
     size_type size() const;
     bool empty() const;
     void clear();
@@ -79,6 +82,15 @@ namespace std {
     template<typename It> void assign(It first, It last);
     T& back(); T const& back() const;
     T& front(); T const& front() const;
+    T& at(int); T const& at(int) const;
+    iterator erase(iterator pos); iterator erase(iterator first, iterator last);
+    iterator insert(iterator pos, T const& v);
+    iterator insert(iterator pos, int n, T const& v);
+    template<typename It> iterator insert(iterator pos, It first, It last);
+    void swap(vector<T>&);
+    size_type capacity() const;
+    void reserve(int n);
+    void shrink_to_fit();
     T& operator[](int);
     T const& operator[](int) const;
     iterator begin(); const_iterator begin() const;
@@ -104,6 +116,9 @@ namespace std {
   template<typename T> class deque {
   public:
     struct iterator { T& operator*(); iterator& operator++(); bool operator!=(iterator); };
+    deque(); deque(initializer_list<T>);
+    template<typename It> deque(It first, It last);
+    T& at(int); void clear();
     void push_back(T const&); void push_front(T const&);
     void pop_back(); void pop_front();
     T& front(); T& back();
@@ -143,6 +158,8 @@ namespace std {
     V& operator[](K const&);
     int size() const; bool empty() const;
     int count(K const&) const;
+    void insert(pair<K,V> const&);
+    template<typename... A> void emplace(A&&... a);
     void erase(K const&);
     iterator begin(); iterator end(); iterator find(K const&);
   };
@@ -153,6 +170,8 @@ namespace std {
     V& operator[](K const&);
     int size() const; bool empty() const;
     int count(K const&) const;
+    void insert(pair<K,V> const&);
+    template<typename... A> void emplace(A&&... a);
     void erase(K const&);
     iterator begin(); iterator end(); iterator find(K const&);
   };
@@ -160,7 +179,9 @@ namespace std {
   public:
     struct iterator { K const& operator*(); iterator& operator++(); bool operator!=(iterator) const; };
     set(); set(initializer_list<K>);
+    template<typename It> set(It first, It last);
     void insert(K const&);
+    template<typename... A> void emplace(A&&... a);
     void erase(K const&);
     int count(K const&) const;
     int size() const; bool empty() const;
@@ -183,7 +204,9 @@ namespace std {
   public:
     struct iterator { K const& operator*(); iterator& operator++(); bool operator!=(iterator) const; };
     unordered_set();
+    template<typename It> unordered_set(It first, It last);
     void insert(K const&);
+    template<typename... A> void emplace(A&&... a);
     void erase(K const&);
     int count(K const&) const;
     int size() const; bool empty() const;
@@ -268,8 +291,16 @@ namespace std {
   template<typename It, typename Out, typename F> Out transform(It first, It last, Out out, F op);
   template<typename It, typename Out> Out copy(It first, It last, Out out);
   typedef long long ll;
+  typedef unsigned long size_t;
+  typedef long ptrdiff_t;
 }
 using namespace std;
+// size_t is the idiomatic loop-counter type. Undeclared, `for (size_t i = 0; …)`
+// never parsed as a declaration, so `i` was not a variable, read as 0 forever, and
+// the loop spun until the step limit — an infinite loop for a completely ordinary
+// program. It must exist at global scope too, not only inside std.
+typedef unsigned long size_t;
+typedef long ptrdiff_t;
 #define NULL 0
 typedef long long ll;
 typedef unsigned long long ull;
@@ -320,6 +351,10 @@ void srand(unsigned int seed);
 int time(int* t);
 """
 _STUBS_LINES = _STUBS.count('\n')   # stubs end with \n; body starts on the next line
+
+# Types whose zero-argument construction is modelled below in _eval_call, so a
+# childless CALL_EXPR naming one of them is a real value, not an unrunnable stub.
+_DEFAULT_CONSTRUCTIBLE = {'string', 'vector', 'pair'}
 
 
 class _ThisBinding:
@@ -933,6 +968,15 @@ class CppInterpreter:
         # ── queue / stack / deque ── (render as array so frontend handles it)
         if any(ct in type_spell for ct in ('queue', 'stack', 'deque')):
             val = {'kind': 'array', 'values': [], 'label': type_spell, 'ctype': type_spell}
+            # `deque<int> d{1,2,3}` used to drop its elements on the floor — the
+            # container was created empty and every later read was quietly wrong.
+            non_tr = [c for c in children
+                      if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
+            if non_tr:
+                init_vals = self._set_range_values(non_tr)
+                if init_vals is None:
+                    init_vals = self._extract_set_init_values(non_tr[0])
+                val['values'] = [self._store_scalar(v) for v in init_vals]
             self.memory.declare_var(name, val)
             self.memory.update_line(line)
             self._emit(line, f"Declare {name} ({type_spell}).",
@@ -990,7 +1034,14 @@ class CppInterpreter:
             val = {'kind': 'set', 'data': [], 'label': type_spell}
             non_tr = [c for c in children if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF, CK.NAMESPACE_REF)]
             if non_tr:
-                for ev in self._extract_set_init_values(non_tr[0]):
+                # set<int> s(a.begin(), a.end()) — the range ctor. _extract_set_init_values
+                # only ever hunts for an INIT_LIST_EXPR, so a pair of iterators produced
+                # an EMPTY set: the de-duplicating, sorting idiom this construct exists
+                # for silently returned nothing.
+                init_vals = self._set_range_values(non_tr)
+                if init_vals is None:
+                    init_vals = self._extract_set_init_values(non_tr[0])
+                for ev in init_vals:
                     key = self._make_map_key(ev)
                     if not any(e['key'] == key for e in val['data']):
                         val['data'].append({'key': key, 'val': ev})
@@ -2218,7 +2269,13 @@ class CppInterpreter:
         line = cursor.location.line
         fn   = cursor.spelling
         ch   = self._ch(cursor)
-        if not ch and fn not in self.func_defs and fn not in self.class_defs:
+        # A childless CALL_EXPR is usually a stub function we cannot run — but it is
+        # ALSO how libclang spells an implicit default construction. `string t;`
+        # hangs a childless CALL_EXPR 'string' off the declarator, so bailing out
+        # here made t an int 0: `t += 'a'` then did arithmetic and the string came
+        # out as "0". Let the types constructed further down reach their branches.
+        if (not ch and fn not in self.func_defs and fn not in self.class_defs
+                and fn not in _DEFAULT_CONSTRUCTIBLE):
             return _INT(0)
 
         callee_c = ch[0] if ch else None
@@ -2357,26 +2414,31 @@ class CppInterpreter:
         if fn in ('operator+', 'operator+='):
             # When called as a method (MEMBER_REF_EXPR callee), extract the object
             # from the first child of the MEMBER_REF_EXPR (not the method ref itself).
-            if callee_c and callee_c.kind == CK.MEMBER_REF_EXPR:
+            # A MEMBER_REF_EXPR callee is only the METHOD ref when it is spelled
+            # 'operator+=' itself (the explicit s.operator+=(x) form). For the
+            # ordinary `v[0].name += x`, that member ref IS the lvalue — descending
+            # into its child grabbed the owning STRUCT instead of the string, so the
+            # append was computed on the wrong operand and then thrown away.
+            if (callee_c and callee_c.kind == CK.MEMBER_REF_EXPR
+                    and callee_c.spelling == fn):
                 mr_ch = self._ch(callee_c)
-                lhs = self._eval(mr_ch[0]) if mr_ch else _INT(0)
-                # With MEMBER_REF_EXPR callee, ch[1] is the real argument (no method-ref slot)
-                rhs_c = ch[1] if len(ch) > 1 else None
+                lhs_c = mr_ch[0] if mr_ch else None
             else:
-                lhs = self._eval(callee_c) if callee_c else _INT(0)
-                # libclang inserts a method-ref descriptor as ch[1] (UNEXPOSED_EXPR 'operator+')
-                # when the call is (obj).operator+(arg) — skip it, real arg is ch[2]
-                rhs_c = None
-                for cand in ch[1:]:
-                    sp = cand.spelling or ''
-                    type_spell = cand.type.spelling if cand.type else ''
-                    # Skip method-ref descriptor slots: UNEXPOSED_EXPR with function-pointer
-                    # type like 'string &(*)(char)'. Real arguments (e.g. s[i] wrapped in
-                    # UNEXPOSED_EXPR('operator[]')) have value types, not function-ptr types.
-                    if cand.kind == CK.UNEXPOSED_EXPR and sp.startswith('operator') and '(*)' in type_spell:
-                        continue  # method-ref slot — skip
-                    rhs_c = cand
-                    break
+                lhs_c = callee_c
+            lhs = self._eval(lhs_c) if lhs_c is not None else _INT(0)
+            # libclang inserts a method-ref descriptor as ch[1] (UNEXPOSED_EXPR 'operator+')
+            # when the call is (obj).operator+(arg) — skip it, real arg is ch[2]
+            rhs_c = None
+            for cand in ch[1:]:
+                sp = cand.spelling or ''
+                type_spell = cand.type.spelling if cand.type else ''
+                # Skip method-ref descriptor slots: UNEXPOSED_EXPR with function-pointer
+                # type like 'string &(*)(char)'. Real arguments (e.g. s[i] wrapped in
+                # UNEXPOSED_EXPR('operator[]')) have value types, not function-ptr types.
+                if cand.kind == CK.UNEXPOSED_EXPR and sp.startswith('operator') and '(*)' in type_spell:
+                    continue  # method-ref slot — skip
+                rhs_c = cand
+                break
             rhs = self._eval(rhs_c) if rhs_c else _INT(0)
             if isinstance(lhs, dict) and lhs.get('kind') == 'char':
                 lv = lhs.get('value', '')
@@ -2387,27 +2449,26 @@ class CppInterpreter:
                 else:
                     rv = ''
                 result = {'kind': 'char', 'value': lv + rv}
-                if fn == 'operator+=':
-                    if callee_c and callee_c.kind == CK.MEMBER_REF_EXPR:
-                        mr_ch2 = self._ch(callee_c)
-                        obj_name = self._cursor_name(mr_ch2[0]) if mr_ch2 else ''
-                    else:
-                        obj_name = self._cursor_name(callee_c) if callee_c else ''
-                    if obj_name:
-                        self.memory.set_var(obj_name, result)
+                # Write through the LVALUE CURSOR, not a name: `v[0] += "!"` has no
+                # variable name to set_var, so the append used to vanish.
+                # _write_lval already knows names, members and subscripts alike.
+                if fn == 'operator+=' and lhs_c is not None:
+                    self._write_lval(lhs_c, result, line)
                 return result
             # User-defined operator+ on struct/class
             if isinstance(lhs, dict) and lhs.get('kind') == 'struct':
+                # lhs_c, not callee_c: they differ for the explicit operator+= form,
+                # where callee_c is a bound-member-function type with no class name.
                 class_name = self._base_type(
-                    callee_c.type.spelling if callee_c and callee_c.type else '')
+                    lhs_c.type.spelling if lhs_c is not None and lhs_c.type else '')
                 if class_name and class_name in self.class_defs:
                     op_key = fn  # 'operator+' or 'operator+='
                     methods = self.class_defs[class_name].get('methods', {})
                     if op_key in methods:
-                        obj_name = self._cursor_name(callee_c) if callee_c else ''
+                        obj_name = self._cursor_name(lhs_c) if lhs_c is not None else ''
                         if obj_name:
                             return self._call_method_on_stack(
-                                class_name, obj_name, callee_c, op_key, [rhs], line,
+                                class_name, obj_name, lhs_c, op_key, [rhs], line,
                                 arg_cursors=[rhs_c] if rhs_c else None)
             return _INT(0)
 
@@ -2549,6 +2610,18 @@ class CppInterpreter:
             if _r is not None:
                 return _r
 
+        # ── copy-construction from a member, spelled without a wrapper ─────
+        # `return n;` inside a CONST method comes back as CALL_EXPR 'string' whose
+        # ONLY child is the MEMBER_REF_EXPR itself; the non-const form wraps it in
+        # an UNEXPOSED_EXPR. Unguarded, the branch below reads that member ref as
+        # the CALLEE and dispatches the FIELD name as a method, so a const getter
+        # returning a string handed back 0. A real method call always spells the
+        # method name in cursor.spelling, so a mismatch means construction.
+        if (callee_c is not None and callee_c.kind == CK.MEMBER_REF_EXPR
+                and fn in _DEFAULT_CONSTRUCTIBLE and callee_c.spelling != fn
+                and len(ch) == 1):
+            return self._eval(callee_c)
+
         # ── member-function / method call ──────────────────────────────────
         if callee_c and callee_c.kind == CK.MEMBER_REF_EXPR:
             method_name = callee_c.spelling
@@ -2665,8 +2738,9 @@ class CppInterpreter:
         # that doesn't resolve to a MEMBER_REF_EXPR, so it slips past the method
         # dispatch above. Recover it from tokens and route to push semantics.
         _toks = [t.spelling for t in cursor.get_tokens()]
-        if 'emplace' in _toks:
-            ei = _toks.index('emplace')
+        if 'emplace' in _toks or 'emplace_back' in _toks:
+            _meth = 'emplace' if 'emplace' in _toks else 'emplace_back'
+            ei = _toks.index(_meth)
             if ei >= 2 and _toks[ei - 1] in ('.', '->'):
                 _obj = _toks[ei - 2]
                 _arg_cs = [c for c in ch
@@ -2674,6 +2748,22 @@ class CppInterpreter:
                            and not (c.kind == CK.UNEXPOSED_EXPR
                                     and '(*)' in (c.type.spelling if c.type else ''))]
                 _args = [self._eval(c) for c in _arg_cs]
+                # Route on what the object ACTUALLY is. Sending every emplace to the
+                # queue/stack handler appended a pair to a map's 'values' list, so a
+                # later m[k] read back as that pair — corruption, not just a no-op.
+                try:
+                    _ov = self.memory.get_var(_obj)
+                except RuntimeError:
+                    _ov = None
+                if isinstance(_ov, dict):
+                    _ok = _ov.get('kind')
+                    if _ok in ('set', 'map'):
+                        return self._call_map_method(
+                            _obj, _ov.get('label', _ok + '<int>'), 'emplace', _args, line)
+                    if _ok == 'multiset':
+                        return self._call_multiset_method(_obj, 'insert', _args, line)
+                    if _ok == 'array' and 'ctype' not in _ov:
+                        return self._call_vector_method(_obj, None, _meth, _args, line)
                 return self._call_collection_method(_obj, 'emplace', _args, line)
 
         # ── class constructor call (fn is a class name) ────────────────────
@@ -2828,11 +2918,31 @@ class CppInterpreter:
         if actual_obj.kind == CK.CALL_EXPR and actual_obj.spelling == 'operator[]':
             och = self._ch(actual_obj)
             if len(och) >= 2:
-                row = self._to_int(self._eval(och[-1]))
                 arr_val = self._eval_member_or_var(och[0])
+                # m[k][i] on a map<K, vector<V>>: the outer keeps entries under 'data'
+                # keyed by string, not under 'values' indexed by int, so the generic
+                # path below found nothing and returned 0. Writes and m[k].size()
+                # already worked, which is exactly what made the wrong read so hard
+                # to notice.
+                if isinstance(arr_val, dict) and arr_val.get('kind') == 'map':
+                    mkey  = self._make_map_key(self._eval(och[-1]))
+                    inner = arr_val.get('data', {}).get(mkey)
+                    if isinstance(inner, dict) and inner.get('kind') == 'array':
+                        ivals = inner.get('values', [])
+                        if 0 <= idx < len(ivals):
+                            cell = ivals[idx]
+                            return cell if isinstance(cell, dict) else _INT(int(cell))
+                    return _INT(0)
+                row = self._to_int(self._eval(och[-1]))
                 vals = arr_val.get('values', []) if isinstance(arr_val, dict) else []
                 try:
                     inner = vals[row]
+                    # v[2][0] where v is vector<string>: the inner element is TEXT,
+                    # so the second subscript picks a character out of it.
+                    if isinstance(inner, dict) and inner.get('kind') == 'char':
+                        _s = inner.get('value', '')
+                        return {'kind': 'char',
+                                'value': _s[idx] if 0 <= idx < len(_s) else ''}
                     # inner may be a plain list, a dict {kind:'array',...}, or a scalar
                     if isinstance(inner, dict) and inner.get('kind') == 'array':
                         inner_vals = inner.get('values', [])
@@ -2913,7 +3023,7 @@ class CppInterpreter:
                     init_values = [self._eval(a) for a in self._ch(c)]
                     break
             if cd['ctors']:
-                self._run_ctor_on_heap(base, addr, cd['ctors'][0], ctor_args, line)
+                self._run_ctor_on_heap(base, addr, self._pick_ctor(cd, ctor_args), ctor_args, line)
             elif init_values:
                 # Aggregate init: positionally assign values to fields in declaration order
                 field_names = list(cd['fields'].keys())
@@ -2975,6 +3085,14 @@ class CppInterpreter:
         _is_bare_pair = (_outer.startswith('pair<') or _outer == 'pair') and '[' not in type_spell
         if _is_bare_pair and len(ch) == 2:
             return self._make_pair(self._eval(ch[0]), self._eval(ch[1]))
+        # `v.push_back({"pen", 3})` and `Item{"book", 5}`: libclang stamps the TARGET
+        # class on the init-list cursor, so the aggregate can be built right here.
+        # Without it the braces degraded to a plain array and EVERY field read came
+        # back 0 — the struct never existed. Array-of-struct declarators carry '[' in
+        # the spelling and keep their own element-wise path.
+        _cls = self._base_type(_outer)
+        if _cls in self.class_defs and '[' not in type_spell:
+            return self._aggregate_init(_cls, [self._eval(c) for c in ch])
         # 2D: all children are inner init lists → {{1,3,1},{1,5,1},{4,2,1}}
         if ch and all(c.kind == CK.INIT_LIST_EXPR for c in ch):
             rows = [[self._to_int(self._eval(e)) for e in self._ch(rc)] for rc in ch]
@@ -3148,15 +3266,47 @@ class CppInterpreter:
         else:
             try:
                 obj_val = self.memory.get_var(obj_name)
-                if isinstance(obj_val, dict) and obj_val.get('kind') == 'struct':
-                    obj_val['fields'][field] = rval
-                    self.memory.set_var(obj_name, obj_val)
-                    self.memory.update_line(line)
-                    self._emit(line, f"{obj_name}.{field} = {self._fmt(rval)}.",
-                               {'type': 'assign', 'target': f'{obj_name}.{field}',
-                                'value': self._fmt(rval)})
             except RuntimeError:
-                pass
+                obj_val = None
+            if isinstance(obj_val, dict) and obj_val.get('kind') == 'struct':
+                obj_val['fields'][field] = rval
+                self.memory.set_var(obj_name, obj_val)
+                self.memory.update_line(line)
+                self._emit(line, f"{obj_name}.{field} = {self._fmt(rval)}.",
+                           {'type': 'assign', 'target': f'{obj_name}.{field}',
+                            'value': self._fmt(rval)})
+                return
+            # `o.in.a = 1` — the base is itself a member access, so its flattened
+            # name ('o.in') is not a variable. Walk the chain from the real root.
+            # This used to fall through silently: no step, no error, wrong value.
+            chain = self._member_chain(obj_c)
+            if chain:
+                root, path = chain
+                try:
+                    root_val = self.memory.get_var(root)
+                except RuntimeError:
+                    root_val = None
+                inner = self._walk_struct_path(root_val, path)
+                if inner is not None:
+                    inner['fields'][field] = rval
+                    self.memory.set_var(root, root_val)
+                    self.memory.update_line(line)
+                    tgt = f'{obj_name}.{field}'
+                    self._emit(line, f"{tgt} = {self._fmt(rval)}.",
+                               {'type': 'assign', 'target': tgt,
+                                'value': self._fmt(rval)})
+                    return
+            # `v[0].name = …` — the base is a subscript, so there is no root variable
+            # to walk from. Evaluating it yields the LIVE struct stored in the
+            # container, so setting the field on it persists in place.
+            _live = self._eval(obj_c)
+            if isinstance(_live, dict) and _live.get('kind') == 'struct':
+                _live.setdefault('fields', {})[field] = rval
+                self.memory.update_line(line)
+                tgt = f'{obj_name}.{field}'
+                self._emit(line, f"{tgt} = {self._fmt(rval)}.",
+                           {'type': 'assign', 'target': tgt, 'value': self._fmt(rval)})
+                return
 
     def _write_subscript(self, cursor, rval, line: int, rhs_cursor=None):
         """Write rval to arr[i] or arr[i][j]."""
@@ -3419,6 +3569,40 @@ class CppInterpreter:
                 if t in ('->', '.') and i + 1 < len(toks):
                     return toks[i + 1]
         return ''
+
+    def _member_chain(self, cursor):
+        """(root_var, [field, …]) for a nested member access like `o.in.a`, else None.
+
+        Nested MEMBER_REF_EXPRs are left-deep, so only the innermost child names a
+        variable the Memory layer can look up. _cursor_name flattens the chain to the
+        string 'o.in', which get_var can never resolve — the write then vanished
+        down a bare `except RuntimeError: pass`.
+        """
+        fields = []
+        c = self._deep_unwrap(cursor) or cursor
+        while c is not None and c.kind == CK.MEMBER_REF_EXPR:
+            f = c.spelling or self._member_field_name(c)
+            ch = self._ch(c)
+            if not f or not ch:
+                return None
+            fields.append(f)
+            c = self._deep_unwrap(ch[0]) or ch[0]
+        if c is None or c.kind != CK.DECL_REF_EXPR or not c.spelling:
+            return None
+        fields.reverse()
+        return c.spelling, fields
+
+    def _walk_struct_path(self, root_val, path):
+        """Descend `path` through nested struct dicts; None if any hop isn't a struct.
+
+        Returns the live inner dict, so mutating it and re-storing the root persists.
+        """
+        node = root_val
+        for f in path:
+            if not (isinstance(node, dict) and node.get('kind') == 'struct'):
+                return None
+            node = node.get('fields', {}).get(f)
+        return node if isinstance(node, dict) and node.get('kind') == 'struct' else None
 
     # ── Reference parameter write-back helpers ───────────────────────────────
 
@@ -4937,7 +5121,7 @@ class CppInterpreter:
 
         if cd['ctors']:
             # Pick the right constructor: copy ctor if arg is same-class struct
-            _ctor = cd['ctors'][0]
+            _ctor = self._pick_ctor(cd, ctor_args)
             if (len(ctor_args) == 1 and isinstance(ctor_args[0], dict)
                     and ctor_args[0].get('kind') == 'struct'
                     and ctor_args[0].get('class') == class_name):
@@ -4969,8 +5153,29 @@ class CppInterpreter:
         fields.update({f: self._default_for_type(t) for f, t in cd['fields'].items()})
         obj    = {'kind': 'struct', 'fields': fields, 'class': class_name}
         if cd['ctors']:
-            obj = self._run_ctor_on_stack_val(class_name, obj, cd['ctors'][0], args, line)
+            obj = self._run_ctor_on_stack_val(class_name, obj, self._pick_ctor(cd, args), args, line)
         return obj
+
+    def _pick_ctor(self, cd: dict, args: list):
+        """Constructor overload matching this argument count, else the first.
+
+        Every call site used to take ctors[0] unconditionally, so a class that
+        declares its default ctor first — `Point(){x=0;y=0;} Point(int,int)…` —
+        ran the DEFAULT one for `Point(1,1)` and threw both arguments away. The
+        object came back all zeros with no error anywhere.
+        """
+        ctors = cd.get('ctors') or []
+        if not ctors:
+            return None
+        n = len(args)
+        for c in ctors:
+            if len(self._get_params(c)) == n:
+                return c
+        # No exact arity: prefer one that can at least accept them all (defaults).
+        for c in ctors:
+            if len(self._get_params(c)) > n:
+                return c
+        return ctors[0]
 
     def _run_ctor_on_stack_val(self, class_name: str, obj: dict,
                                ctor_cursor, args: list, line: int) -> dict:
@@ -5030,7 +5235,7 @@ class CppInterpreter:
                     base_fields = {f: self._default_for_type(t) for f, t in base_cd['fields'].items()}
                     base_obj = {'kind': 'struct', 'fields': base_fields, 'class': base_cls}
                     if base_cd['ctors']:
-                        base_obj = self._run_ctor_on_stack_val(base_cls, base_obj, base_cd['ctors'][0], base_args, line)
+                        base_obj = self._run_ctor_on_stack_val(base_cls, base_obj, self._pick_ctor(base_cd, base_args), base_args, line)
                     obj['fields'].update(base_obj['fields'])
             i += 2
 
@@ -5215,9 +5420,19 @@ class CppInterpreter:
                         end_idx = len(data)
                     sliced = list(data[start_idx:end_idx])
                     return {'kind': 'array', 'values': sliced}
-            n        = self._to_int(self._eval(real_args[0])) if real_args else 0
-            init_val = self._to_int(self._eval(real_args[1])) if len(real_args) > 1 else 0
-            return {'kind': 'array', 'values': [init_val] * n}
+            n = self._to_int(self._eval(real_args[0])) if real_args else 0
+            if len(real_args) > 1:
+                # `vector<string> v(3, "zz")` — _to_int here turned the fill into the
+                # code point 122, so every element read back as a number.
+                init_val = self._store_scalar(self._eval(real_args[1]))
+            else:
+                # vector<T>(n) value-initialises: "" for string, 0 for a number.
+                init_val = self._default_for_type(self._elem_type(type_spell) or 'int')
+                if isinstance(init_val, dict) and init_val.get('kind') == 'int':
+                    init_val = 0
+            # deepcopy per slot: a shared dict would make a write to one element
+            # show up in all of them.
+            return {'kind': 'array', 'values': [copy.deepcopy(init_val) for _ in range(n)]}
 
     def _extract_map_init_pairs(self, cursor) -> list:
         """Recursively find INIT_LIST_EXPR in map initializer and return [(key, val)] pairs.
@@ -5260,6 +5475,36 @@ class CppInterpreter:
                 if result is not None:
                     return result
         return []
+
+    def _set_range_values(self, children) -> list:
+        """Values covered by a (first, last) iterator-pair constructor, else None.
+
+        None means "these children are not a range" so the caller can fall back to
+        the initialiser-list path; an empty list is a legitimately empty range.
+        """
+        # `set<int> s(a.begin(), a.end())` hangs both iterators off a single
+        # CALL_EXPR 'set' rather than off the VAR_DECL, so unwrap one level first.
+        if len(children) == 1:
+            inner = self._unwrap(children[0]) or children[0]
+            if inner.kind == CK.CALL_EXPR:
+                children = [c for c in self._ch(inner)
+                            if c.kind not in (CK.TYPE_REF, CK.TEMPLATE_REF,
+                                              CK.NAMESPACE_REF)]
+        if len(children) < 2:
+            return None
+        try:
+            first, last = self._eval(children[0]), self._eval(children[1])
+        except Exception:
+            return None
+        if not (isinstance(first, dict) and first.get('kind') == 'iterator'
+                and isinstance(last, dict) and last.get('kind') == 'iterator'):
+            return None
+        data = first.get('data', [])
+        beg  = first.get('idx') or 0
+        end  = last.get('idx')
+        end  = len(data) if end is None else end
+        return [e if isinstance(e, dict) else _INT(int(e))
+                for e in list(data)[beg:end]]
 
     def _extract_set_init_values(self, cursor) -> list:
         """Recursively find INIT_LIST_EXPR in set/unordered_set initializer and return a flat list of values."""
@@ -5316,7 +5561,7 @@ class CppInterpreter:
             n = self._to_int(a0)
             # Scalars are stored as plain ints, matching what push_back/resize put in
             # the list, so the frontend still sees a homogeneous number[].
-            proto = (a1 if isinstance(a1, dict) and a1.get('kind') in ('struct', 'array')
+            proto = (a1 if isinstance(a1, dict) and a1.get('kind') in ('struct', 'array', 'char')
                      else self._to_int(a1))
             return [copy.deepcopy(proto) for _ in range(max(0, n))]
 
@@ -5324,6 +5569,155 @@ class CppInterpreter:
         if isinstance(a0, dict) and a0.get('kind') == 'array':
             return copy.deepcopy(list(a0.get('values', [])))
         return []
+
+    def _unsupported_method(self, method_name: str, container: str, line: int):
+        """Refuse an unrecognised container method instead of pretending it returned 0.
+
+        Silent wrongness is strictly worse than an error: every dispatcher below used
+        to fall through to _INT(0), so a method DryRun cannot model produced a
+        confident wrong number and a trace that looked finished. The frontend turns
+        any error into a banner plus a "Convert for DryRun" button, so raising points
+        the user at a real remedy instead.
+        """
+        where = self._adj(line)
+        raise ValueError(
+            f"Unsupported method '{method_name}' on {container} — DryRun can't trace "
+            f"this yet" + (f" (line {where})." if where > 0 else "."))
+
+    def _iter_index(self, val, n: int):
+        """Index an iterator argument denotes, or None if it isn't index-like.
+
+        end() carries idx None, and iterator arithmetic reads that sentinel as 0, so
+        `end() - k` arrives as a NEGATIVE index. Folding negatives back from the end
+        is the only reading under which `v.end() - 1` means the last element.
+        """
+        if isinstance(val, dict):
+            if val.get('kind') == 'iterator':
+                idx = val.get('idx')
+                if idx is None:
+                    return n
+                return idx + n if idx < 0 else idx
+            if val.get('kind') == 'int':
+                return int(val.get('value', 0))
+        return None
+
+    def _store_scalar(self, val):
+        """Coerce a value the way _arr_push does, so inserted elements match pushed ones."""
+        return (val if isinstance(val, dict)
+                and val.get('kind') in ('struct', 'array', 'char')
+                else self._to_int(val))
+
+    def _vec_arg_name(self, val) -> str:
+        """Name currently bound to this exact container object, if any.
+
+        swap() must write BOTH sides back, but a method dispatcher only ever receives
+        evaluated values. An identity search finds the owning slot without threading
+        arg cursors through every call site.
+        """
+        if not isinstance(val, dict):
+            return ''
+        for frame in reversed(self.memory.stack):
+            for k, v in frame['variables'].items():
+                if v is val:
+                    return k
+        return ''
+
+    def _aggregate_init(self, class_name: str, vals: list) -> dict:
+        """Build a struct from a braced initialiser's POSITIONAL values.
+
+        Aggregate init fills fields in declaration order, base-class fields first —
+        the same order _build_class_value lays them out.
+        """
+        cd     = self.class_defs[class_name]
+        fields = {}
+        for base in cd.get('bases', []):
+            if base in self.class_defs:
+                fields.update({f: self._default_for_type(t)
+                               for f, t in self.class_defs[base]['fields'].items()})
+        fields.update({f: self._default_for_type(t) for f, t in cd['fields'].items()})
+        names = list(fields.keys())
+        for i, v in enumerate(vals):
+            if i >= len(names):
+                break
+            fields[names[i]] = v if isinstance(v, dict) else _INT(int(v))
+        return {'kind': 'struct', 'fields': fields, 'class': class_name}
+
+    def _coerce_to_elem(self, val, elem_spell: str, line: int):
+        """Fit a value to the container's declared ELEMENT type.
+
+        Two things only the element type can settle: a braced initialiser arrives as
+        a bare 'array' and has to become the element STRUCT, and a char value has to
+        collapse to its code when the elements are numbers (`vector<int>` holding
+        'a' is 97) but must stay text when they are not.
+        """
+        if not elem_spell:
+            return val
+        base = self._base_type(elem_spell)
+        if not isinstance(val, dict):
+            return val
+        if base in self.class_defs and val.get('kind') == 'array':
+            return self._aggregate_init(base, val.get('values', []))
+        if (val.get('kind') == 'char' and base
+                and base not in ('string', 'char', 'auto')
+                and any(t in base for t in ('int', 'long', 'short', 'unsigned',
+                                            'size_t', 'bool', 'float', 'double'))):
+            return _INT(self._to_int(val))
+        return val
+
+    def _elem_type(self, type_spell: str) -> str:
+        """First template argument of a container spelling, or '' if there is none.
+
+        'vector<pair<int, int> >' → 'pair<int, int>'. Nesting and the trailing
+        allocator argument both have to be respected, so this counts angle-bracket
+        depth rather than reaching for the first '>' or ','.
+        """
+        s = (type_spell or '').replace('std::', '')
+        i = s.find('<')
+        if i == -1:
+            return ''
+        depth, out = 0, []
+        for ch in s[i:]:
+            if ch == '<':
+                depth += 1
+                if depth == 1:
+                    continue
+            elif ch == '>':
+                depth -= 1
+                if depth == 0:
+                    break
+            elif ch == ',' and depth == 1:
+                break          # vector<T, Alloc> — only T is the element type
+            out.append(ch)
+        return ''.join(out).strip()
+
+    def _emplaced_value(self, args: list, elem_spell: str, line: int):
+        """Value that emplace_back/emplace(...) constructs in place.
+
+        emplace FORWARDS its arguments to the element's constructor, so arity alone
+        cannot say what to build — the element type decides. Getting this wrong is
+        invisible at the call site, which is exactly how emplace_back managed to be
+        a silent no-op for so long.
+        """
+        base = self._base_type(elem_spell) if elem_spell else ''
+        # emplace_back(Item{...}) hands over a temporary that is ALREADY a T — the
+        # braces may still be sitting in it as a bare array, so fit it first. Feeding
+        # that whole value to the constructor instead produced an empty struct.
+        if len(args) == 1:
+            only = self._coerce_to_elem(args[0], elem_spell, line)
+            if isinstance(only, dict) and only.get('kind') == 'struct':
+                return only
+        if base in self.class_defs:
+            return self._build_class_value(base, args, line)
+        # No user type: two arguments spell a pair, which is what
+        # vector<pair<...>>/map value emplacement overwhelmingly means.
+        if len(args) >= 2:
+            return self._make_pair(args[0], args[1])
+        return args[0] if args else _INT(0)
+
+    def _emplace_arg(self, args: list, obj_c, line: int):
+        """emplace_back's argument list collapsed to the single value to append."""
+        spell = (obj_c.type.spelling if obj_c is not None and obj_c.type else '')
+        return self._emplaced_value(args, self._elem_type(spell), line)
 
     def _call_vector_method(self, obj_name: str, obj_c,
                             method_name: str, args: list, line: int) -> dict:
@@ -5354,12 +5748,16 @@ class CppInterpreter:
             elif real_name:
                 self.memory.set_var(real_name, arr)
 
-        if method_name == 'push_back':
-            raw    = args[0] if args else _INT(0)
+        # emplace_back constructs in place but the OBSERVABLE effect is push_back's,
+        # so they share one path; only the value construction differs.
+        if method_name in ('push_back', 'emplace_back'):
+            _elem = self._elem_type(obj_c.type.spelling if obj_c is not None and obj_c.type else '')
+            raw   = (self._emplace_arg(args, obj_c, line) if method_name == 'emplace_back'
+                     else self._coerce_to_elem(args[0] if args else _INT(0), _elem, line))
             stored = self._arr_push(arr, raw)
             save()
             self.memory.update_line(line)
-            self._emit(line, f"{obj_name}.push_back({self._fmt(stored)}).",
+            self._emit(line, f"{obj_name}.{method_name}({self._fmt(stored)}).",
                        {'type': 'assign', 'target': obj_name, 'value': self._fmt(stored)})
             return _INT(0)
 
@@ -5368,19 +5766,33 @@ class CppInterpreter:
         if method_name == 'empty':
             return _INT(int(len(vals) == 0))
 
+        # at() is operator[] WITH bounds checking — the checking is the whole reason
+        # a program picks it. Returning 0 for an out-of-range index turned a
+        # would-be exception into a plausible-looking wrong answer.
+        if method_name == 'at':
+            idx = self._to_int(args[0]) if args else 0
+            if not (0 <= idx < len(vals)):
+                self._crash(line, 'out_of_range',
+                            f'{real_name}.at({idx}) — index out of range '
+                            f'(size is {len(vals)})')
+            v = vals[idx]
+            return v if isinstance(v, dict) else _INT(int(v))
+
         if method_name == 'resize':
             n    = self._to_int(args[0]) if args else len(vals)
             if len(args) > 1:
                 raw_fill = args[1]
                 # Use plain int for scalar fills so array stays number[]
                 fill = (copy.deepcopy(raw_fill)
-                        if isinstance(raw_fill, dict) and raw_fill.get('kind') in ('struct', 'array')
+                        if isinstance(raw_fill, dict) and raw_fill.get('kind') in ('struct', 'array', 'char')
                         else self._to_int(raw_fill))
             else:
+                # A value-initialised element is whatever the ELEMENT type's default
+                # is — for vector<string> that is "", not the number 0.
                 obj_type_spell = (obj_c.type.spelling if obj_c and obj_c.type else '')
-                fill = ({'kind': 'array', 'values': []}
-                        if obj_type_spell.count('vector') >= 2
-                        else 0)
+                fill = self._default_for_type(self._elem_type(obj_type_spell) or 'int')
+                if isinstance(fill, dict) and fill.get('kind') == 'int':
+                    fill = 0
             while len(vals) < n: vals.append(copy.deepcopy(fill))
             arr['values'] = vals[:n]
             save()
@@ -5430,6 +5842,92 @@ class CppInterpreter:
             save()
             return _INT(0)
 
+        # erase/insert shift the tail, so a no-op here (what these used to be) leaves
+        # every later index off by one — the classic silently-wrong answer.
+        if method_name == 'erase':
+            first = self._iter_index(args[0], len(vals)) if args else None
+            if first is None:
+                return _INT(0)
+            # erase(first, last) removes a half-open range; erase(it) one element.
+            last = (self._iter_index(args[1], len(vals)) if len(args) > 1 else None)
+            if last is None:
+                last = first + 1 if len(args) == 1 else len(vals)
+            first, last = max(0, first), min(len(vals), max(first, last))
+            del vals[first:last]
+            arr['values'] = vals
+            arr.pop('lastWrite', None)
+            save()
+            self.memory.update_line(line)
+            self._emit(line, f'{real_name}.erase() — {last - first} element(s) removed, '
+                             f'{len(vals)} left.',
+                       {'type': 'assign', 'target': real_name, 'value': f'[{len(vals)}]'})
+            return _INT(0)
+
+        if method_name in ('insert', 'emplace'):
+            pos = self._iter_index(args[0], len(vals)) if args else None
+            if pos is None:
+                return _INT(0)
+            pos = max(0, min(len(vals), pos))
+            # emplace(pos, args…) constructs one element in place at pos.
+            if method_name == 'emplace':
+                new = [self._store_scalar(self._emplace_arg(args[1:], obj_c, line))]
+            # insert(pos, n, v) repeats v; insert(pos, first, last) splices a range.
+            elif len(args) >= 3 and not (isinstance(args[1], dict)
+                                       and args[1].get('kind') == 'iterator'):
+                n   = self._to_int(args[1])
+                one = self._store_scalar(args[2])
+                new = [copy.deepcopy(one) for _ in range(max(0, n))]
+            elif (len(args) >= 3 and isinstance(args[1], dict)
+                    and args[1].get('kind') == 'iterator'):
+                new = self._assign_values(args[1:3])
+            else:
+                new = [self._store_scalar(args[1])] if len(args) > 1 else []
+            vals[pos:pos] = new
+            arr['values'] = vals
+            arr['lastWrite'] = [pos] if new else None
+            if arr.get('lastWrite') is None:
+                arr.pop('lastWrite', None)
+            save()
+            self.memory.update_line(line)
+            self._emit(line, f'{real_name}.insert() at index {pos} — '
+                             f'{len(vals)} element(s).',
+                       {'type': 'assign', 'target': real_name, 'value': f'[{len(vals)}]'})
+            return _INT(0)
+
+        if method_name == 'swap':
+            other = args[0] if args else None
+            other_name = self._vec_arg_name(other)
+            if not (isinstance(other, dict) and other.get('kind') == 'array'):
+                return _INT(0)
+            mine, theirs = list(vals), list(other.get('values', []))
+            arr['values'] = theirs
+            other['values'] = mine
+            for holder in (arr, other):
+                holder.pop('lastWrite', None)
+            save()
+            if other_name:
+                self.memory.set_var(other_name, other)
+            self.memory.update_line(line)
+            self._emit(line, f'{real_name}.swap({other_name or "other"}) — sizes now '
+                             f'{len(theirs)} and {len(mine)}.',
+                       {'type': 'assign', 'target': real_name, 'value': f'[{len(theirs)}]'})
+            return _INT(0)
+
+        # capacity is an allocation detail, so it is only ever as real as the growth
+        # model behind it; _arr_push keeps that model (geometric doubling) honest.
+        if method_name == 'capacity':
+            return _INT(max(arr.get('cap', len(vals)), len(vals)))
+
+        # reserve/shrink_to_fit change no VALUES, only the capacity they report.
+        if method_name == 'reserve':
+            arr['cap'] = max(arr.get('cap', len(vals)), self._to_int(args[0]) if args else 0)
+            save()
+            return _INT(0)
+        if method_name == 'shrink_to_fit':
+            arr['cap'] = len(vals)
+            save()
+            return _INT(0)
+
         if method_name == 'begin':
             return {'kind': 'iterator', 'data': vals, 'idx': 0} if vals else {'kind': 'iterator', 'data': vals, 'idx': None}
         if method_name == 'end':
@@ -5439,7 +5937,9 @@ class CppInterpreter:
         if method_name == 'rend':
             return {'kind': 'iterator', 'data': vals, 'idx': None}
 
-        return _INT(0)
+        # deque/queue reach this dispatcher through the dependent-type fallback, so
+        # name what the variable ACTUALLY is rather than always saying "vector".
+        self._unsupported_method(method_name, arr.get('ctype') or 'vector', line)
 
     def _call_method_on_subscript(self, subscript_c, method_name: str,
                                    args: list, line: int) -> dict:
@@ -5464,6 +5964,17 @@ class CppInterpreter:
         if outer_arr is None and self._this_stack:
             outer_arr = self._read_this_field(real_name, line)
             is_this   = True
+
+        # `g[0][0].size()` — the base is itself a subscript, so it has no variable
+        # name to look up and the whole call used to answer 0. Evaluating the base
+        # yields the LIVE inner dict, so reads are right and dict-valued elements
+        # still mutate in place.
+        if not isinstance(outer_arr, dict):
+            _ev = self._eval(outer_c)
+            if isinstance(_ev, dict):
+                outer_arr = _ev
+                is_this   = False
+                real_name = ''
 
         if not isinstance(outer_arr, dict):
             return _INT(0)
@@ -5491,12 +6002,22 @@ class CppInterpreter:
                     self.memory.set_var(real_name, outer_arr)
                 self.memory.update_line(line)
 
-            if method_name == 'push_back':
-                stored = self._arr_push(inner, args[0] if args else _INT(0))
+            if method_name in ('push_back', 'emplace_back'):
+                raw = (self._emplaced_value(args, '', line) if method_name == 'emplace_back'
+                       else (args[0] if args else _INT(0)))
+                stored = self._arr_push(inner, raw)
                 _persist()
-                self._emit(line, f"{real_name}[{mkey}].push_back({self._fmt(stored)}).",
+                self._emit(line, f"{real_name}[{mkey}].{method_name}({self._fmt(stored)}).",
                            {'type': 'assign', 'target': f'{real_name}[{mkey}]', 'value': self._fmt(stored)})
                 return _INT(0)
+            if method_name == 'at':
+                i = self._to_int(args[0]) if args else 0
+                if not (0 <= i < len(inner_vals)):
+                    self._crash(line, 'out_of_range',
+                                f'{real_name}[{mkey}].at({i}) — index out of range '
+                                f'(size is {len(inner_vals)})')
+                v = inner_vals[i]
+                return v if isinstance(v, dict) else _INT(int(v))
             if method_name == 'pop_back':
                 if inner_vals:
                     inner['values'] = inner_vals[:-1]
@@ -5534,14 +6055,27 @@ class CppInterpreter:
             return _INT(0)
 
         inner = vals[idx]
+        # A vector<string> element is a STRING, not a container: `v[0].size()` used
+        # to read the missing 'values' list and answer 0 for every element.
+        if isinstance(inner, dict) and inner.get('kind') == 'char':
+            def _save_elem(new_s):
+                vals[idx] = {'kind': 'char', 'value': new_s}
+                outer_arr['values'] = vals
+                if is_this:
+                    self._write_this_field(real_name, outer_arr, line)
+                elif real_name:
+                    self.memory.set_var(real_name, outer_arr)
+            return self._string_method(inner.get('value', ''), _save_elem,
+                                       f'{real_name}[{idx}]', method_name, args, line)
         if isinstance(inner, list):
             inner = {'kind': 'array', 'values': inner}
         elif not isinstance(inner, dict):
             inner = {'kind': 'array', 'values': []}
         inner_vals = list(inner.get('values', []))
 
-        if method_name == 'push_back':
-            raw    = args[0] if args else _INT(0)
+        if method_name in ('push_back', 'emplace_back'):
+            raw    = (self._emplaced_value(args, '', line) if method_name == 'emplace_back'
+                      else (args[0] if args else _INT(0)))
             stored = self._arr_push(inner, raw)
             vals[idx] = inner
             outer_arr['values'] = vals
@@ -5550,9 +6084,18 @@ class CppInterpreter:
             elif real_name:
                 self.memory.set_var(real_name, outer_arr)
             self.memory.update_line(line)
-            self._emit(line, f"{real_name}[{idx}].push_back({self._fmt(stored)}).",
+            self._emit(line, f"{real_name}[{idx}].{method_name}({self._fmt(stored)}).",
                        {'type': 'assign', 'target': f'{real_name}[{idx}]', 'value': self._fmt(stored)})
             return _INT(0)
+
+        if method_name == 'at':
+            i = self._to_int(args[0]) if args else 0
+            if not (0 <= i < len(inner_vals)):
+                self._crash(line, 'out_of_range',
+                            f'{real_name}[{idx}].at({i}) — index out of range '
+                            f'(size is {len(inner_vals)})')
+            v = inner_vals[i]
+            return v if isinstance(v, dict) else _INT(int(v))
 
         # adj[u].assign(n, v) — same replace-the-contents contract as the plain
         # vector path, just persisted through the enclosing outer array.
@@ -5606,23 +6149,40 @@ class CppInterpreter:
             else:
                 return _INT(0)
         inner = vals[idx]
+        real_name = (arr_name.split(':')[-1] if arr_name and arr_name.startswith('__')
+                     else arr_name) or 'arr'
+        # Same for a C array of strings: `string w[3]; w[0].size()`.
+        if isinstance(inner, dict) and inner.get('kind') == 'char':
+            def _save_elem(new_s):
+                vals[idx] = {'kind': 'char', 'value': new_s}
+                outer_arr['values'] = vals
+                self._put_array(arr_name, arr_c, outer_arr, line)
+            return self._string_method(inner.get('value', ''), _save_elem,
+                                       f'{real_name}[{idx}]', method_name, args, line)
         if isinstance(inner, list):
             inner = {'kind': 'array', 'values': inner}
         elif not isinstance(inner, dict):
             inner = {'kind': 'array', 'values': []}
         inner_vals = list(inner.get('values', []))
-        real_name = (arr_name.split(':')[-1] if arr_name and arr_name.startswith('__')
-                     else arr_name) or 'arr'
-        if method_name == 'push_back':
-            raw    = args[0] if args else _INT(0)
+        if method_name in ('push_back', 'emplace_back'):
+            raw    = (self._emplaced_value(args, '', line) if method_name == 'emplace_back'
+                      else (args[0] if args else _INT(0)))
             stored = self._arr_push(inner, raw)
             vals[idx] = inner
             outer_arr['values'] = vals
             self._put_array(arr_name, arr_c, outer_arr, line)
             self.memory.update_line(line)
-            self._emit(line, f"{real_name}[{idx}].push_back({self._fmt(stored)}).",
+            self._emit(line, f"{real_name}[{idx}].{method_name}({self._fmt(stored)}).",
                        {'type': 'assign', 'target': f'{real_name}[{idx}]', 'value': self._fmt(stored)})
             return _INT(0)
+        if method_name == 'at':
+            i = self._to_int(args[0]) if args else 0
+            if not (0 <= i < len(inner_vals)):
+                self._crash(line, 'out_of_range',
+                            f'{real_name}[{idx}].at({i}) — index out of range '
+                            f'(size is {len(inner_vals)})')
+            v = inner_vals[i]
+            return v if isinstance(v, dict) else _INT(int(v))
         if method_name in ('clear', 'assign'):
             inner['values'] = [] if method_name == 'clear' else self._assign_values(args)
             inner.pop('lastWrite', None)
@@ -5823,7 +6383,7 @@ class CppInterpreter:
                         rvals = range_arr.get('values', [])
                         if 0 <= i < len(rvals):
                             rvals[i] = (updated if isinstance(updated, dict)
-                                        and updated.get('kind') in ('struct', 'array')
+                                        and updated.get('kind') in ('struct', 'array', 'char')
                                         else self._to_int(updated))
                             range_arr['values'] = rvals
                             self.memory.set_var(range_name, range_arr)
@@ -5993,7 +6553,7 @@ class CppInterpreter:
 
         if method_name == 'push_front':
             raw    = args[0] if args else _INT(0)
-            stored = (raw if isinstance(raw, dict) and raw.get('kind') in ('struct', 'array')
+            stored = (raw if isinstance(raw, dict) and raw.get('kind') in ('struct', 'array', 'char')
                       else self._to_int(raw))
             vals   = col.get('values', [])
             vals.insert(0, stored)
@@ -6005,7 +6565,26 @@ class CppInterpreter:
                        {'type': 'assign', 'target': real_name, 'value': self._fmt(stored)})
             return _INT(0)
 
-        return _INT(0)
+        # deque declares these in _STUBS, so they must not reach the refusal below.
+        if method_name == 'at':
+            i = self._to_int(args[0]) if args else 0
+            if not (0 <= i < len(vals)):
+                self._crash(line, 'out_of_range',
+                            f'{real_name}.at({i}) — index out of range (size is {len(vals)})')
+            v = vals[i]
+            return v if isinstance(v, dict) else _INT(int(v))
+        if method_name == 'clear':
+            col['values'] = []
+            save()
+            return _INT(0)
+        if method_name == 'begin':
+            return {'kind': 'iterator', 'data': vals, 'idx': 0 if vals else None}
+        if method_name in ('end', 'rend'):
+            return {'kind': 'iterator', 'data': vals, 'idx': None}
+        if method_name == 'rbegin':
+            return {'kind': 'iterator', 'data': vals, 'idx': len(vals) - 1 if vals else None}
+
+        self._unsupported_method(method_name, col.get('ctype') or 'container', line)
 
     def _make_map_key(self, val) -> str:
         """Convert a value to a string map key."""
@@ -6031,17 +6610,21 @@ class CppInterpreter:
     @staticmethod
     def _set_sort_key(key: str):
         """Sort key for set entries: pairs sort lexicographically by (first, second)."""
+        # A set is homogeneous in practice, so tag the kind first: numbers sort
+        # numerically, text lexicographically. Collapsing all text to one constant
+        # (as this did) left set<string> in INSERTION order — *s.begin() was
+        # whatever happened to go in first, not the smallest element.
         if key.startswith('(') and ',' in key:
             inner = key[1:-1]
             parts = inner.split(',', 1)
             try:
-                return (int(parts[0]), int(parts[1]))
+                return (0, (int(parts[0]), int(parts[1])), '')
             except ValueError:
-                pass
+                return (1, (0, 0), key)
         try:
-            return (int(key), 0)
+            return (0, (int(key), 0), '')
         except ValueError:
-            return (float('inf'), 0)
+            return (1, (0, 0), key)
 
     def _call_multiset_method(self, obj_name: str, method_name: str, args: list, line: int) -> dict:
         """Handle multiset<T> method calls. data is a sorted list allowing duplicates,
@@ -6135,7 +6718,7 @@ class CppInterpreter:
                 if method_name == 'upper_bound' and ev > target:
                     return _mk_iter(i)
             return _end_iter()
-        return _INT(0)
+        self._unsupported_method(method_name, 'multiset', line)
 
     def _call_map_method(self, obj_name: str, obj_type: str, method_name: str,
                          args: list, line: int, arg_cursors=None) -> dict:
@@ -6183,11 +6766,20 @@ class CppInterpreter:
             if isinstance(data, dict):
                 return _INT(1 if key in data else 0)
             return _INT(1 if any(_ekey(e) == key for e in data) else 0)
-        if method_name == 'insert':
-            val = args[0] if args else _INT(0)
-            # Unwrap pair<K,V>: insert(make_pair(k, v)) → data[k] = v
+        if method_name in ('insert', 'emplace'):
+            # emplace forwards its arguments to the element's constructor, so for a
+            # map (and for a set of pairs) emplace(k, v) builds exactly the pair that
+            # insert already takes. Routing it here is also what stops it reaching
+            # _call_collection_method, which appended the pair to a 'values' list and
+            # left m[k] reading back as a pair instead of the mapped value.
+            val = (self._make_pair(args[0], args[1]) if len(args) >= 2
+                   else (args[0] if args else _INT(0)))
+            # Unwrap pair<K,V>: insert(make_pair(k, v)) → data[k] = v. Only a MAP
+            # splits the pair — in a set<pair<…>> the pair IS the element, and
+            # keying it on .first alone silently collapsed distinct entries.
             _pair_key = None; _pair_val = val
-            if (isinstance(val, dict) and val.get('kind') == 'struct'):
+            if (isinstance(val, dict) and val.get('kind') == 'struct'
+                    and isinstance(data, dict)):
                 _f = val.get('fields', {})
                 if 'first' in _f and 'second' in _f:
                     _pair_key = self._make_map_key(_f['first'])
@@ -6264,8 +6856,18 @@ class CppInterpreter:
                 if method_name == 'upper_bound' and ev > target:
                     return _mk_iter(i)
             return _end_iter()
+        # *s.rbegin() is the idiomatic "largest element" — data is kept sorted.
+        if method_name == 'rbegin' and isinstance(data, list):
+            return _mk_iter(len(data) - 1) if data else _end_iter()
+        if method_name == 'rend' and isinstance(data, list):
+            return _end_iter()
+        # Unlike operator[], map::at does NOT insert — it throws. Returning 0 for a
+        # missing key is the silent-wrongness the caller chose at() to avoid.
         if method_name == 'at' and isinstance(data, dict):
             key = self._make_map_key(args[0]) if args else '0'
+            if key not in data:
+                self._crash(line, 'out_of_range',
+                            f'{real_name}.at({key}) — key not present in map')
             return data.get(key, _INT(0))
         if method_name in ('operator[]',) and isinstance(data, dict):
             key = self._make_map_key(args[0]) if args else '0'
@@ -6273,7 +6875,7 @@ class CppInterpreter:
                 data[key] = _INT(0)
                 save()
             return data.get(key, _INT(0))
-        return _INT(0)
+        self._unsupported_method(method_name, 'set' if is_set else 'map', line)
 
     def _call_string_method(self, obj_name: str, obj_c, method_name: str,
                             args: list, line: int) -> dict:
@@ -6291,6 +6893,16 @@ class CppInterpreter:
             s_val = self._read_this_field(real_name, line)
             is_this = True
 
+        # `v[0].name.size()` — a string reached through a subscript or a member has
+        # no variable name to look up, so the resolution above finds nothing and the
+        # method answered as if the string were empty. Evaluate the cursor instead
+        # and write back through it.
+        via_cursor = False
+        if not (isinstance(s_val, dict) and s_val.get('kind') == 'char') and obj_c is not None:
+            _ev = self._eval(obj_c)
+            if isinstance(_ev, dict) and _ev.get('kind') == 'char':
+                s_val, is_this, via_cursor = _ev, False, True
+
         if isinstance(s_val, dict) and s_val.get('kind') == 'char':
             s = s_val.get('value', '')
         else:
@@ -6298,11 +6910,23 @@ class CppInterpreter:
 
         def save(new_s):
             new_val = {'kind': 'char', 'value': new_s}
-            if is_this:
+            if via_cursor:
+                self._write_lval(obj_c, new_val, line)
+            elif is_this:
                 self._write_this_field(real_name, new_val, line)
             elif real_name:
                 self.memory.set_var(real_name, new_val)
 
+        return self._string_method(s, save, real_name, method_name, args, line)
+
+    def _string_method(self, s: str, save, real_name: str, method_name: str,
+                       args: list, line: int) -> dict:
+        """std::string methods over a resolved value plus a writeback.
+
+        Split out from _call_string_method so a string that is NOT a named variable —
+        `v[0].size()` on a vector<string> element — gets the identical
+        implementation instead of a second, drifting copy.
+        """
         if method_name in ('size', 'length'):
             return _INT(len(s))
         if method_name == 'empty':
@@ -6413,8 +7037,10 @@ class CppInterpreter:
                 needle = needle  # substring rfind
             result = s.rfind(needle)
             return _INT(result)
-        if method_name == 'c_str':
-            return {'kind': 'char', 'value': s}
+        # c_str()/data() hand out a C string, and a C string ENDS at the first NUL.
+        # `s.resize(5)` on "abc" pads with NULs that cout must not print.
+        if method_name in ('c_str', 'data'):
+            return {'kind': 'char', 'value': s.split('\0')[0]}
         if method_name == 'resize':
             new_len = self._to_int(args[0]) if args else len(s)
             fill_ch = args[1].get('value', '\0')[:1] if len(args) > 1 and isinstance(args[1], dict) else '\0'
@@ -6424,9 +7050,9 @@ class CppInterpreter:
                 new_s = s[:new_len]
             save(new_s)
             return _INT(0)
-        if method_name == 'reserve':
+        if method_name in ('reserve', 'shrink_to_fit'):
             return _INT(0)
-        return _INT(0)
+        self._unsupported_method(method_name, 'string', line)
 
     # ── this-binding helpers ────────────────────────────────────────────────
 
@@ -6536,12 +7162,23 @@ class CppInterpreter:
                 return {'kind': 'array', 'values': [], 'declared_size': size}
             cap  = min(size, _LAZY_THRESHOLD)
             is_char_arr = type_spell.lower().startswith('char')
-            vals = [{'kind': 'char', 'value': '\0'} if is_char_arr else 0] * cap
+            # `string w[] = {"ab","cd"}` is an array of TEXT, but only char arrays
+            # were recognised as such, so every element went through _to_int and
+            # came back as the first character's code — w[0] read as 97, not "ab".
+            is_text_arr = is_char_arr or self._base_type(type_spell) == 'string'
+            if is_char_arr:
+                # Fresh dict per slot: `[d] * cap` aliases one object into every
+                # element, so an in-place write to w[0] would show up in all of them.
+                vals = [{'kind': 'char', 'value': '\0'} for _ in range(cap)]
+            elif is_text_arr:
+                vals = [{'kind': 'char', 'value': ''} for _ in range(cap)]
+            else:
+                vals = [0] * cap
             if has_init:
                 for ci, e in enumerate(self._ch(init_c)):
                     if ci < cap:
                         v = self._eval(e)
-                        vals[ci] = v if is_char_arr else self._to_int(v)
+                        vals[ci] = v if is_text_arr else self._to_int(v)
             return {'kind': 'array', 'values': vals, 'declared_size': size}
 
         return {'kind': 'array', 'values': []}
@@ -6742,6 +7379,20 @@ class CppInterpreter:
         # vector check must come before primitive checks — 'vector<vector<int>>' contains 'int'
         if 'vector' in ts:
             return {'kind': 'array', 'values': []}
+        # A user type wins over the primitive SUBSTRING sniff below, which matches on
+        # any occurrence anywhere in the name: `Point` contains "int", `Solution`
+        # contains "long", `Char`/`Node`… — every such struct used to default to
+        # int 0, so a nested `Point p;` field read back as a number and the program
+        # kept running on it. Named lookup is exact, so it must be asked first.
+        # Pointers stay out of this: `Node*` bases to `Node`, and recursing into a
+        # self-referential node type would never terminate.
+        if '*' not in type_spell:
+            base = self._base_type(type_spell)
+            if base in self.class_defs:
+                return {'kind': 'struct', 'fields': {
+                    f: self._default_for_type(t)
+                    for f, t in self.class_defs[base]['fields'].items()
+                }}
         if any(t in ts for t in ('int', 'long', 'short', 'unsigned',
                                   'size_t', 'bool', 'float', 'double')):
             return _INT(0)
@@ -6749,12 +7400,6 @@ class CppInterpreter:
             return {'kind': 'char', 'value': ''}
         if '*' in type_spell:
             return {'kind': 'pointer', 'address': None}
-        base = self._base_type(type_spell)
-        if base in self.class_defs:
-            return {'kind': 'struct', 'fields': {
-                f: self._default_for_type(t)
-                for f, t in self.class_defs[base]['fields'].items()
-            }}
         return _INT(0)
 
     # ── Trace emission ───────────────────────────────────────────────────────
@@ -7176,10 +7821,24 @@ class CppInterpreter:
         """Append val to arr, set lastWrite to the new tail index.
         Preserves struct/inner-array dicts; coerces everything else to plain int.
         Returns the stored value."""
-        stored = (val if isinstance(val, dict) and val.get('kind') in ('struct', 'array')
+        # 'char' carries std::string values too, and coercing it here turned
+        # `vector<string> v; v.push_back("pen")` into the number 112 ('p'). Callers
+        # that know the element type is numeric coerce first, via _coerce_to_elem.
+        stored = (val if isinstance(val, dict)
+                  and val.get('kind') in ('struct', 'array', 'char')
                   else self._to_int(val))
         vals = arr.get('values', [])
+        # Capacity is only meaningful if we model the GEOMETRIC growth: libstdc++
+        # doubles from whatever the vector already had, so a list-initialised vector
+        # reports capacity == size until the first push. Guessing a power of two
+        # instead reported 4 for `vector<int>{1,2,3}` where g++ says 3.
+        cap = arr.get('cap')
+        if cap is None:
+            cap = len(vals)
         vals.append(stored)
+        if len(vals) > cap:
+            cap = max(1, cap * 2)
+        arr['cap']       = cap
         arr['values']    = vals
         arr['lastWrite'] = [len(vals) - 1]
         return stored
