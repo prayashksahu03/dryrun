@@ -477,6 +477,25 @@ CASES = [
      '  for(auto &p : f) cout<<p.first<<"="<<p.second<<" "; cout<<"\\n"; }'),
 ]
 
+# ── KNOWN, UNFIXED: variable scope in the trace display ──────────────────
+# At a statement after a for-loop has ended, the trace still reports the loop
+# variable (`i`, `r`) as if it were live. stdout is CORRECT — this is a display
+# bug in which variables a step claims are in scope, which matters because the
+# memory panel is the product. Found 2026-08-26 while building the promo videos.
+# No assertion here yet (the harness compares stdout, and stdout is right);
+# recorded so it is not rediscovered from scratch.
+SCOPE_LEAK_REPRO = """#include <iostream>
+using namespace std;
+int main(){
+  int a[6] = {5,2,9,1,7,3};
+  int best = 0;
+  for (int i = 0; i < 3; i++) best += a[i];
+  int sum = best;
+  for (int r = 3; r < 6; r++) { sum += a[r] - a[r-3]; if (sum > best) best = sum; }
+  cout << best << endl;   // <-- frame here still lists i and r
+  return 0;
+}"""
+
 FULL_STDIN    = "4\n1000\n1111\n1010\n0001\n"
 FULL_EXPECTED = "Yes\n2 3\n2 4\n3 1\n"
 
