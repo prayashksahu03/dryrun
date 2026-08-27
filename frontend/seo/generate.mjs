@@ -77,14 +77,14 @@ color:var(--tx3);font-size:13.5px}
 
 const nav = `<header class="nav"><div class="wrap">
 <a class="brand" href="/"><span>&#9672;</span> DryRun</a>
-<nav><a href="/visualize/">Visualizations</a><a href="/learn">Learn</a><a href="/app">Open the tool</a></nav>
+<nav><a href="/visualize">Visualizations</a><a href="/learn">Learn</a><a href="/app">Open the tool</a></nav>
 </div></header>`;
 
 const footer = `<footer><div class="wrap">
 <p><strong style="color:var(--tx2)">DryRun</strong> runs your real code and shows you every step —
 memory, stack frames and data structures — with an AI tutor grounded in the actual execution.</p>
 <p style="margin-top:8px"><a href="/app">Open the tool</a> &middot;
-<a href="/visualize/">All visualizations</a> &middot; <a href="/learn">Learn</a></p>
+<a href="/visualize">All visualizations</a> &middot; <a href="/learn">Learn</a></p>
 </div></footer>`;
 
 function page({ head, body, canonical }) {
@@ -134,7 +134,7 @@ function algoPage(a, bySlug) {
       mainEntityOfPage:{'@type':'WebPage','@id':url} },
     { '@context':'https://schema.org','@type':'BreadcrumbList', itemListElement:[
       {'@type':'ListItem',position:1,name:'Home',item:SITE_URL},
-      {'@type':'ListItem',position:2,name:'Visualizations',item:`${SITE_URL}/visualize/`},
+      {'@type':'ListItem',position:2,name:'Visualizations',item:`${SITE_URL}/visualize`},
       {'@type':'ListItem',position:3,name:a.h1,item:url}] },
   ];
   if ((a.faq || []).length) ld.push({
@@ -146,7 +146,7 @@ function algoPage(a, bySlug) {
     .map(s => `<a href="/visualize/${s}">${esc(bySlug[s].h1)}</a>`).join('');
 
   const body = `
-<div class="crumb"><a href="/visualize/" style="color:var(--tx3)">Visualizations</a> / ${esc(a.category||'')}</div>
+<div class="crumb"><a href="/visualize" style="color:var(--tx3)">Visualizations</a> / ${esc(a.category||'')}</div>
 <h1>${esc(a.h1)}</h1>
 <p class="lede">${esc(a.intro)}</p>
 <p><a class="cta" href="${runHref}">&#9654; Run this code in DryRun</a></p>
@@ -177,7 +177,7 @@ ${rel ? `<h2>Related</h2><div class="rel">${rel}</div>` : ''}
 
 // ── index of all visualizations ───────────────────────────────────────────
 function indexPage(list) {
-  const url = `${SITE_URL}/visualize/`;
+  const url = `${SITE_URL}/visualize`;
   const cats = {};
   for (const a of list) (cats[a.category || 'other'] ||= []).push(a);
   const body = `
@@ -215,7 +215,7 @@ out('visualize/index.html', indexPage(list));
 
 const urls = [
   { loc: `${SITE_URL}/`,             pri: '1.0', freq: 'weekly'  },
-  { loc: `${SITE_URL}/visualize/`,   pri: '0.9', freq: 'weekly'  },
+  { loc: `${SITE_URL}/visualize`,   pri: '0.9', freq: 'weekly'  },
   { loc: `${SITE_URL}/learn`,        pri: '0.7', freq: 'monthly' },
   { loc: `${SITE_URL}/app`,          pri: '0.8', freq: 'monthly' },
   ...list.map(a => ({ loc: `${SITE_URL}/visualize/${a.slug}`, pri: '0.8', freq: 'monthly' })),
