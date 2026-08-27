@@ -475,6 +475,88 @@ CASES = [
      'int main(){ map<string,int> f; string w[]={"a","b","a","c","b","a"};\n'
      '  for(int i=0;i<6;i++) f[w[i]]++;\n'
      '  for(auto &p : f) cout<<p.first<<"="<<p.second<<" "; cout<<"\\n"; }'),
+
+    # ── BUG: the causal chain for `x = <binary>` RE-EVALUATED both operands to
+    #    describe the step, so every call in the RHS ran TWICE. The sum was still
+    #    right, which is exactly why it hid: only a side effect exposes it. A bare
+    #    call RHS and `cout << f()+f()` build no chain, so both stayed correct. ──
+    ("binary-rhs-calls-run-once-on-init", "3 calls=2\n",
+     H + 'int calls = 0;\nint f(int x){ calls++; return x; }\n'
+         'int main(){ int s = f(1) + f(2); cout<<s<<" calls="<<calls<<"\\n"; }'),
+    ("binary-rhs-calls-run-once-on-assign", "7 calls=2\n",
+     H + 'int calls = 0;\nint f(int x){ calls++; return x; }\n'
+         'int main(){ int t; t = f(3) + f(4); cout<<t<<" calls="<<calls<<"\\n"; }'),
+    # Nesting made it worse: re-evaluating the LEFT operand replayed a whole
+    # sub-tree of calls, so a 3-call expression reported 6.
+    ("binary-rhs-nested-calls-run-once", "5 calls=3\n",
+     H + 'int calls = 0;\nint f(int x){ calls++; return x; }\n'
+         'int main(){ int w = f(1)*f(2) + f(3); cout<<w<<" calls="<<calls<<"\\n"; }'),
+    # `arr[i] = <binary>` builds an INDEX chain through the same RHS builder.
+    ("binary-rhs-calls-run-once-on-index", "11 calls=2\n",
+     H + 'int calls = 0;\nint f(int x){ calls++; return x; }\n'
+         'int main(){ vector<int> v(1); v[0] = f(5) + f(6);\n'
+         '  cout<<v[0]<<" calls="<<calls<<"\\n"; }'),
+    # Naming the cell for a READ node re-derives the INDEX, so a side-effecting
+    # subscript ticked its counter a second time by the same mechanism.
+    ("binary-rhs-side-effecting-index-runs-once", "15 1\n",
+     H + 'int main(){ vector<int> a = {10,20,30}; int i = 0;\n'
+         '  int s = a[i++] + 5; cout<<s<<" "<<i<<"\\n"; }'),
+    # A side-effecting RHS is the only witness, but the plain arithmetic chain
+    # this feature exists for must keep working.
+    ("binary-rhs-plain-arithmetic-still-ok", "9 4\n",
+     H + 'int main(){ int a=5,b=4; int s=a+b; int d=a-1; cout<<s<<" "<<d<<"\\n"; }'),
+
+    # ── BUG: push_back COERCED its argument to an int unless it was a struct,
+    #    array or char, so a vector<Node*> silently stored 1 for every non-null
+    #    pointer. Indexed writes into a pre-sized vector went through a different
+    #    path and were fine, which is why only push_back — the BFS idiom — broke.
+    ("push-back-pointer-element", "1 7\n",
+     H + 'struct Node { int val; };\n'
+         'int main(){ Node a; a.val = 7; vector<Node*> q; q.push_back(&a);\n'
+         '  cout<<q.size()<<" "<<q[0]->val<<"\\n"; }'),
+    ("emplace-back-pointer-element", "7 9\n",
+     H + 'struct Node { int val; };\n'
+         'int main(){ Node a; a.val=7; Node b; b.val=9; Node* p=&a;\n'
+         '  vector<Node*> q; q.emplace_back(p); q.emplace_back(&b);\n'
+         '  cout<<q[0]->val<<" "<<q[1]->val<<"\\n"; }'),
+    ("push-back-pointer-bfs-queue", "1 2 3 \n",
+     '#include <iostream>\n#include <vector>\n#include <queue>\nusing namespace std;\n'
+     'struct Node { int val; Node* l; Node* r; };\n'
+     'int main(){ Node c{2,0,0}, d{3,0,0}, a{1,&c,&d};\n'
+     '  vector<Node*> q; q.push_back(&a);\n'
+     '  for(size_t i=0;i<q.size();i++){ Node* n=q[i]; cout<<n->val<<" ";\n'
+     '    if(n->l) q.push_back(n->l); if(n->r) q.push_back(n->r); }\n'
+     '  cout<<"\\n"; }'),
+    # Same coercion swallowed every other non-scalar element kind.
+    ("push-back-int-pointer-element", "6 7\n",
+     H + 'int main(){ int x=6, y=7; vector<int*> p; p.push_back(&x); p.push_back(&y);\n'
+         '  cout<<*p[0]<<" "<<*p[1]<<"\\n"; }'),
+    # KNOWN_UNFIXED (see below): push_back now STORES the map/set faithfully, but
+    # reading it back through a subscript still cannot dispatch a method on it.
+    ("push-back-map-element", "8 1\n",
+     '#include <iostream>\n#include <vector>\n#include <map>\nusing namespace std;\n'
+     'int main(){ map<int,int> m; m[1]=8; vector<map<int,int>> v; v.push_back(m);\n'
+     '  cout<<v[0][1]<<" "<<v[0].size()<<"\\n"; }'),
+    ("push-back-set-element", "2\n",
+     '#include <iostream>\n#include <vector>\n#include <set>\nusing namespace std;\n'
+     'int main(){ set<int> s; s.insert(4); s.insert(9);\n'
+     '  vector<set<int>> v; v.push_back(s); cout<<v[0].size()<<"\\n"; }'),
+    # The same allow-list had been copied to four other stores, so the SAME value
+    # survived push_back and was flattened by push_front or assign.
+    ("deque-push-front-pointer-element", "9 7\n",
+     '#include <iostream>\n#include <deque>\nusing namespace std;\n'
+     'struct Node { int val; };\n'
+     'int main(){ Node a; a.val=7; Node b; b.val=9;\n'
+     '  deque<Node*> d; d.push_back(&a); d.push_front(&b);\n'
+     '  cout<<d[0]->val<<" "<<d[1]->val<<"\\n"; }'),
+    ("assign-fill-pointer-element", "7 7 2\n",
+     H + 'struct Node { int val; };\n'
+         'int main(){ Node a; a.val=7; vector<Node*> t; t.assign(2, &a);\n'
+         '  cout<<t[0]->val<<" "<<t[1]->val<<" "<<t.size()<<"\\n"; }'),
+    ("resize-fill-pointer-element", "7 7\n",
+     H + 'struct Node { int val; };\n'
+         'int main(){ Node a; a.val=7; vector<Node*> t; t.resize(2, &a);\n'
+         '  cout<<t[0]->val<<" "<<t[1]->val<<"\\n"; }'),
 ]
 
 # ── KNOWN, UNFIXED: variable scope in the trace display ──────────────────
@@ -501,7 +583,16 @@ FULL_EXPECTED = "Yes\n2 3\n2 4\n3 1\n"
 
 # Cases known to fail until the container-method work lands; reported
 # separately so a red line here doesn't look like a fresh regression.
-KNOWN_UNFIXED = set()
+KNOWN_UNFIXED = {
+    # push_back no longer flattens a map/set element to its size — the container
+    # arrives in the vector intact. What is still missing is the READ side:
+    # `vm[0].size()` / `vm[0][k]` go through _call_method_on_subscript, which
+    # resolves map and set collections BY VARIABLE NAME, and a subscripted element
+    # has no name. Storage is right, the lookup is not; fixing it means teaching
+    # that dispatcher to work from a value.
+    'push-back-map-element',
+    'push-back-set-element',
+}
 
 
 def run(src, stdin=''):

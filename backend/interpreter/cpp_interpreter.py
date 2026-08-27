@@ -400,6 +400,12 @@ class CppInterpreter:
         self._vec_iter_vars:  dict = {}   # range_name -> synthetic iter var name in frame
         self._static_vars:    dict = {}   # (func_name, var_name) -> persistent value
         self._static_frame_keys: dict = {} # func_name -> {var_name, ...}
+        # binary-operator cursor hash -> (left_value, right_value) as ACTUALLY
+        # evaluated. The causal chain describes an evaluation that already
+        # happened; asking the operands for their values a second time would run
+        # their side effects a second time. Cleared per statement — a cause chain
+        # never outlives the statement that produced it.
+        self._binop_operands: dict = {}
         self._output_width: int   = 0    # setw(n) state
         self._output_fill:  str   = ' '  # setfill(c) state
         self._output_hex:   bool  = False # hex/dec manipulator state
@@ -727,6 +733,7 @@ class CppInterpreter:
     def _exec_stmt(self, cursor):
         if cursor is None:
             return
+        self._binop_operands.clear()
         k = cursor.kind
         if   k == CK.DECL_STMT:
             for c in self._ch(cursor):
@@ -1726,6 +1733,11 @@ class CppInterpreter:
 
         l = self._eval(ch[0])
         r = self._eval(ch[1])
+        # Remember what the operands actually produced. This is the ONLY moment
+        # they are evaluated, and _rhs_cause_ops needs their values afterwards to
+        # narrate the step; re-deriving them there ran every call in the RHS twice.
+        # Recorded after both operands so a nested binary's entry lands first.
+        self._binop_operands[cursor.hash] = (l, r)
 
         # array_ptr / array arithmetic: p+n, p-n, p-q, arr+n
         if isinstance(l, dict) and l.get('kind') == 'array_ptr':
@@ -5559,10 +5571,9 @@ class CppInterpreter:
         # assign(count, value)
         if a1 is not None:
             n = self._to_int(a0)
-            # Scalars are stored as plain ints, matching what push_back/resize put in
+            # Numbers flatten to plain ints, matching what push_back/resize put in
             # the list, so the frontend still sees a homogeneous number[].
-            proto = (a1 if isinstance(a1, dict) and a1.get('kind') in ('struct', 'array', 'char')
-                     else self._to_int(a1))
+            proto = self._store_scalar(a1)
             return [copy.deepcopy(proto) for _ in range(max(0, n))]
 
         # assign({...}) — an initialiser list arrives already evaluated as an array.
@@ -5601,11 +5612,24 @@ class CppInterpreter:
                 return int(val.get('value', 0))
         return None
 
+    # Numeric value kinds collapse to a bare Python number when stored in a
+    # container; every other kind is a thing in its own right and must survive.
+    _NUMERIC_KINDS = ('int', 'float')
+
     def _store_scalar(self, val):
-        """Coerce a value the way _arr_push does, so inserted elements match pushed ones."""
-        return (val if isinstance(val, dict)
-                and val.get('kind') in ('struct', 'array', 'char')
-                else self._to_int(val))
+        """Flatten val for storage in a container, the way _arr_push does, so
+        inserted elements match pushed ones.
+
+        Only NUMBERS flatten. The old rule was the other way round — an allow-list
+        of struct/array/char, everything else through _to_int — and that answers
+        "what is this worth as a number?" for values that have no number: a
+        `vector<Node*>` stored 1 per non-null pointer and a `vector<map<>>` stored
+        the map's size, both without a word of complaint. Callers that know the
+        element type is numeric still coerce first, via _coerce_to_elem, which is
+        what keeps `vector<int> v; v.push_back('a')` at 97."""
+        if isinstance(val, dict) and val.get('kind') not in self._NUMERIC_KINDS:
+            return val
+        return self._to_int(val)
 
     def _vec_arg_name(self, val) -> str:
         """Name currently bound to this exact container object, if any.
@@ -5698,6 +5722,12 @@ class CppInterpreter:
         invisible at the call site, which is exactly how emplace_back managed to be
         a silent no-op for so long.
         """
+        # _base_type strips '*', so `vector<Node*>` reports the element type as the
+        # CLASS Node and emplace_back(&a) went off and constructed a fresh Node from
+        # the pointer. A pointer element has no constructor to forward to: the one
+        # argument already IS the element.
+        if '*' in (elem_spell or '') and len(args) == 1:
+            return args[0]
         base = self._base_type(elem_spell) if elem_spell else ''
         # emplace_back(Item{...}) hands over a temporary that is ALREADY a T — the
         # braces may still be sitting in it as a bare array, so fit it first. Feeding
@@ -5782,10 +5812,9 @@ class CppInterpreter:
             n    = self._to_int(args[0]) if args else len(vals)
             if len(args) > 1:
                 raw_fill = args[1]
-                # Use plain int for scalar fills so array stays number[]
-                fill = (copy.deepcopy(raw_fill)
-                        if isinstance(raw_fill, dict) and raw_fill.get('kind') in ('struct', 'array', 'char')
-                        else self._to_int(raw_fill))
+                # Same storage rule as push_back: numbers flatten, anything else
+                # keeps its shape.
+                fill = copy.deepcopy(self._store_scalar(raw_fill))
             else:
                 # A value-initialised element is whatever the ELEMENT type's default
                 # is — for vector<string> that is "", not the number 0.
@@ -6382,9 +6411,7 @@ class CppInterpreter:
                     if isinstance(range_arr, dict) and range_arr.get('kind') == 'array':
                         rvals = range_arr.get('values', [])
                         if 0 <= i < len(rvals):
-                            rvals[i] = (updated if isinstance(updated, dict)
-                                        and updated.get('kind') in ('struct', 'array', 'char')
-                                        else self._to_int(updated))
+                            rvals[i] = self._store_scalar(updated)
                             range_arr['values'] = rvals
                             self.memory.set_var(range_name, range_arr)
                 except RuntimeError:
@@ -6553,8 +6580,7 @@ class CppInterpreter:
 
         if method_name == 'push_front':
             raw    = args[0] if args else _INT(0)
-            stored = (raw if isinstance(raw, dict) and raw.get('kind') in ('struct', 'array', 'char')
-                      else self._to_int(raw))
+            stored = self._store_scalar(raw)
             vals   = col.get('values', [])
             vals.insert(0, stored)
             col['values']    = vals
@@ -7440,10 +7466,17 @@ class CppInterpreter:
     def _subscript_cell_ref(self, sub_c):
         """Cell reference for a subscript read/write. 1D `arr[i]` →
         {kind:'cell', name, container_oid, index}. 2D `dp[i][j]` →
-        {kind:'cell', name, container_oid, row, col}. Deeper nesting is deferred."""
+        {kind:'cell', name, container_oid, row, col}. Deeper nesting is deferred.
+
+        Naming a cell means working out its INDEX, and this runs on the narration
+        path, after the statement has already executed. An index that moves the
+        program — `a[i++]`, `a[next()]` — would move it a second time, so such a
+        subscript goes unnamed rather than mis-stepped."""
         try:
             ch = self._ch(sub_c)
             if len(ch) < 2:
+                return None
+            if self._may_have_side_effects(ch[-1]):
                 return None
             base = self._deep_unwrap(ch[0])
             if base is None:
@@ -7451,7 +7484,7 @@ class CppInterpreter:
             # 2D: base is itself a subscript (dp[i] of dp[i][j]).
             if self._is_subscript(base):
                 bch = self._ch(base)
-                if len(bch) < 2:
+                if len(bch) < 2 or self._may_have_side_effects(bch[-1]):
                     return None
                 arr_c = self._deep_unwrap(bch[0])
                 if arr_c is None or self._is_subscript(arr_c):
@@ -7472,14 +7505,38 @@ class CppInterpreter:
         except Exception:
             return None
 
-    def _cause_operand(self, cursor):
-        """Return (READ-op | None, value). A variable operand yields a READ node
-        carrying a stable-oid name-reference; an array-subscript operand yields a
-        READ node carrying a CELL reference (so a self-referential recurrence like
-        dp[i]=dp[i-1]+dp[i-2] exposes which cells it depended on); a literal yields
-        no node."""
+    def _may_have_side_effects(self, cursor) -> bool:
+        """Does evaluating this subtree change program state?
+
+        The causal chain is a DESCRIPTION of a step, so anything it evaluates on
+        its own account must be replayable. Calls, allocations, assignments and
+        ++/-- are not — and `m[k]` is a call to operator[], which default-inserts.
+        Over-approximating costs at most a missing READ node in the chain."""
+        if cursor is None:
+            return False
+        k = cursor.kind
+        if k in (CK.CALL_EXPR, CK.CXX_NEW_EXPR, CK.CXX_DELETE_EXPR,
+                 CK.COMPOUND_ASSIGNMENT_OPERATOR, CK.LAMBDA_EXPR):
+            return True
+        if k == CK.UNARY_OPERATOR and self._get_unary_op(cursor) in (
+                '++', '--', 'p++', 'p--', 'new', 'delete'):
+            return True
+        if k == CK.BINARY_OPERATOR and self._get_binary_op(cursor) == '=':
+            return True
+        return any(self._may_have_side_effects(c) for c in self._ch(cursor))
+
+    def _cause_operand(self, cursor, val):
+        """Return (READ-op | None, value) for an operand whose value is ALREADY
+        known. A variable operand yields a READ node carrying a stable-oid
+        name-reference; an array-subscript operand yields a READ node carrying a
+        CELL reference (so a self-referential recurrence like dp[i]=dp[i-1]+dp[i-2]
+        exposes which cells it depended on); a literal yields no node.
+
+        `val` is handed in rather than computed: this runs AFTER the expression has
+        been evaluated for real, and evaluating it again here is what made every
+        call inside a binary RHS fire twice."""
         c = self._deep_unwrap(cursor)
-        val = self._to_int(self._eval(cursor))
+        val = self._to_int(val)
         if c is not None and c.kind == CK.DECL_REF_EXPR and c.spelling:
             nm = c.spelling
             return ({'op': 'READ',
@@ -7493,7 +7550,11 @@ class CppInterpreter:
         return (None, val)
 
     def _rhs_cause_ops(self, init_cursor, result_val):
-        """READ/COMPUTE ops for the RHS of an assignment (no WRITE), or None."""
+        """READ/COMPUTE ops for the RHS of an assignment (no WRITE), or None.
+
+        Every value here comes from the evaluation that already ran — _eval_binary
+        left the operands in _binop_operands, and result_val is the answer it
+        produced. Nothing on this path may evaluate anything."""
         try:
             c = self._deep_unwrap(init_cursor)
             if c is None:
@@ -7505,8 +7566,14 @@ class CppInterpreter:
                 ch = self._ch(c)
                 if len(ch) < 2:
                     return None
-                left_op, left_val = self._cause_operand(ch[0])
-                right_op, right_val = self._cause_operand(ch[1])
+                # No record means this binary was not the one just evaluated (a
+                # short-circuited operand, a cached path). Narrating it would mean
+                # running it, so say nothing instead.
+                operands = self._binop_operands.get(c.hash)
+                if operands is None:
+                    return None
+                left_op, left_val = self._cause_operand(ch[0], operands[0])
+                right_op, right_val = self._cause_operand(ch[1], operands[1])
                 ops = []
                 if left_op:  ops.append(left_op)
                 if right_op: ops.append(right_op)
@@ -7518,7 +7585,7 @@ class CppInterpreter:
                 nm = c.spelling
                 return [{'op': 'READ',
                          'ref': {'kind': 'name', 'name': nm, 'oid': self._oid_for(nm)},
-                         'value': self._to_int(self._eval(init_cursor))}]
+                         'value': self._to_int(result_val)}]
             return None
         except Exception:
             return None
@@ -7819,14 +7886,9 @@ class CppInterpreter:
 
     def _arr_push(self, arr: dict, val) -> object:
         """Append val to arr, set lastWrite to the new tail index.
-        Preserves struct/inner-array dicts; coerces everything else to plain int.
+        Flattens NUMBERS to bare ints/floats; every other value keeps its shape.
         Returns the stored value."""
-        # 'char' carries std::string values too, and coercing it here turned
-        # `vector<string> v; v.push_back("pen")` into the number 112 ('p'). Callers
-        # that know the element type is numeric coerce first, via _coerce_to_elem.
-        stored = (val if isinstance(val, dict)
-                  and val.get('kind') in ('struct', 'array', 'char')
-                  else self._to_int(val))
+        stored = self._store_scalar(val)
         vals = arr.get('values', [])
         # Capacity is only meaningful if we model the GEOMETRIC growth: libstdc++
         # doubles from whatever the vector already had, so a list-initialised vector
