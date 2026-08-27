@@ -276,7 +276,15 @@ export const useExecutionStore = create<ExecutionStore>((set, get) => ({
   isPlaying: false,
   playbackSpeed: 1,
 
-  editorSource: danglingPointerTrace.source,
+  // SEO landing pages link in as /app?code=<encoded>, so a reader can go straight
+  // from "here's binary search" to running that exact code. Falls back to the demo.
+  editorSource: (() => {
+    try {
+      const q = new URLSearchParams(window.location.search).get('code');
+      if (q && q.trim()) return q;
+    } catch { /* SSR / no window */ }
+    return danglingPointerTrace.source;
+  })(),
   stdinInput: '',
   isLoading: false,
   error: null,
