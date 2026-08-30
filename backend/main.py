@@ -42,6 +42,35 @@ from interpreter.semantic_views import annotate_trace
 
 app = FastAPI(title="MemTrace Backend")
 
+# ── Judge PCH: built once at startup so g++ doesn't re-parse the ~200-file
+# bits/stdc++.h on every submission (crippling on Render's 0.1-CPU free tier).
+# Build-time (Dockerfile) PCH proved unreliable across Render's build cache, so
+# we build it at runtime into /tmp and fall back to a plain compile until ready.
+JUDGE_PCH_DIR = "/tmp/judge_pch"
+JUDGE_PCH_HDR = os.path.join(JUDGE_PCH_DIR, "stdc++.h")
+
+def _build_judge_pch():
+    try:
+        import glob, subprocess as _sp
+        os.makedirs(JUDGE_PCH_DIR, exist_ok=True)
+        found = glob.glob("/usr/include/**/stdc++.h", recursive=True)
+        if not found:
+            return
+        import shutil as _sh
+        _sh.copyfile(found[0], JUDGE_PCH_HDR)
+        # Must match the judge's compile flags exactly or GCC ignores the .gch.
+        _sp.run(["g++", "-std=c++17", "-O1", "-x", "c++-header",
+                 JUDGE_PCH_HDR, "-o", JUDGE_PCH_HDR + ".gch"],
+                timeout=120, check=False)
+    except Exception:
+        pass  # judge falls back to plain compile
+
+@app.on_event("startup")
+def _judge_pch_startup():
+    import threading
+    threading.Thread(target=_build_judge_pch, daemon=True).start()
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -958,8 +987,12 @@ def judge(req: JudgeRequest):
         if lang in ("cpp", "c++"):
             with open(os.path.join(workdir, "src.cpp"), "w", encoding="utf-8") as f:
                 f.write(req.source)
+            _cc = ["g++", "-std=c++17", "-O1"]
+            if os.path.exists(JUDGE_PCH_HDR):
+                _cc += ["-include", JUDGE_PCH_HDR]   # fast path: precompiled header
+            _cc += ["-o", "bin", "src.cpp"]
             comp = _judge_run_once(
-                ["g++", "-std=c++17", "-O1", "-include", "/opt/pch/stdc++.h", "-o", "bin", "src.cpp"],
+                _cc,
                 "", workdir, JUDGE_COMPILE_TIMEOUT_S,
                 JUDGE_COMPILE_MEM_MB, JUDGE_COMPILE_CPU_S, JUDGE_COMPILE_FSIZE)
             compiled_ok = (not comp["timed_out"]) and comp["returncode"] == 0

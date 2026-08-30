@@ -10,17 +10,6 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# Precompile <bits/stdc++.h> in place so every student compile skips re-parsing
-# the ~200-file header. On Render's shared CPU this turns a 10s+ compile into ~1s.
-# GCC auto-uses the .gch when the compile flags match (-std=c++17 -O2), which the
-# judge uses. Without this, cold compiles time out on the free tier.
-RUN STDCPP=$(find /usr/include -name 'stdc++.h' | head -1) \
-    && test -n "$STDCPP" \
-    && mkdir -p /opt/pch \
-    && cp "$STDCPP" /opt/pch/stdc++.h \
-    && g++ -std=c++17 -O1 -x c++-header /opt/pch/stdc++.h -o /opt/pch/stdc++.h.gch \
-    && test -f /opt/pch/stdc++.h.gch \
-    && echo "PCH built: $(ls -la /opt/pch/stdc++.h.gch)"
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
