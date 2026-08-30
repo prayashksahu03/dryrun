@@ -744,7 +744,7 @@ def _judge_env_float(name: str, default: float) -> float:
 JUDGE_MAX_CASES         = _judge_env_int("JUDGE_MAX_CASES", 50)            # cases per request
 JUDGE_MAX_SOURCE_LEN    = _judge_env_int("JUDGE_MAX_SOURCE_LEN", 64_000)   # chars of source
 JUDGE_RUN_TIMEOUT_S     = _judge_env_float("JUDGE_RUN_TIMEOUT_S", 5.0)     # wall-clock per run
-JUDGE_COMPILE_TIMEOUT_S = _judge_env_float("JUDGE_COMPILE_TIMEOUT_S", 20.0)# wall-clock for g++
+JUDGE_COMPILE_TIMEOUT_S = _judge_env_float("JUDGE_COMPILE_TIMEOUT_S", 30.0)# wall-clock for g++
 JUDGE_TOTAL_TIMEOUT_S   = _judge_env_float("JUDGE_TOTAL_TIMEOUT_S", 30.0)  # wall-clock whole request
 JUDGE_MEM_LIMIT_MB      = _judge_env_int("JUDGE_MEM_LIMIT_MB", 256)        # RLIMIT_AS per run
 JUDGE_COMPILE_MEM_MB    = _judge_env_int("JUDGE_COMPILE_MEM_MB", 768)      # RLIMIT_AS for g++
@@ -959,7 +959,7 @@ def judge(req: JudgeRequest):
             with open(os.path.join(workdir, "src.cpp"), "w", encoding="utf-8") as f:
                 f.write(req.source)
             comp = _judge_run_once(
-                ["g++", "-std=c++17", "-O2", "-o", "bin", "src.cpp"],
+                ["g++", "-std=c++17", "-O1", "-include", "/opt/pch/stdc++.h", "-o", "bin", "src.cpp"],
                 "", workdir, JUDGE_COMPILE_TIMEOUT_S,
                 JUDGE_COMPILE_MEM_MB, JUDGE_COMPILE_CPU_S, JUDGE_COMPILE_FSIZE)
             compiled_ok = (not comp["timed_out"]) and comp["returncode"] == 0

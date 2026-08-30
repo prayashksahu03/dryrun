@@ -16,8 +16,11 @@ RUN apt-get update \
 # judge uses. Without this, cold compiles time out on the free tier.
 RUN STDCPP=$(find /usr/include -name 'stdc++.h' | head -1) \
     && test -n "$STDCPP" \
-    && g++ -std=c++17 -O2 -x c++-header "$STDCPP" -o "$STDCPP.gch" \
-    && echo "PCH built at $STDCPP.gch"
+    && mkdir -p /opt/pch \
+    && cp "$STDCPP" /opt/pch/stdc++.h \
+    && g++ -std=c++17 -O1 -x c++-header /opt/pch/stdc++.h -o /opt/pch/stdc++.h.gch \
+    && test -f /opt/pch/stdc++.h.gch \
+    && echo "PCH built: $(ls -la /opt/pch/stdc++.h.gch)"
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
