@@ -1,0 +1,15 @@
+# Never ship secrets or local cruft into the image. Critical now that /judge
+# runs untrusted student code: a readable .env on disk + no network block would
+# be a key-exfiltration path. The real EXPLAIN_API_KEY arrives via Render env.
+.env
+.env.*
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/
+*.db
+*.log
+.git/
+.DS_Store

@@ -8,6 +8,18 @@ import json
 import os
 import re
 import hashlib
+import shutil
+import signal
+import subprocess
+import tempfile
+import time
+
+try:
+    import resource  # Unix-only; present on Linux (Render) and macOS.
+    _RESOURCE_AVAILABLE = True
+except Exception:  # pragma: no cover - non-Unix
+    resource = None            # type: ignore
+    _RESOURCE_AVAILABLE = False
 
 from dotenv import load_dotenv
 load_dotenv()  # load backend/.env into os.environ before anything reads it
@@ -704,6 +716,281 @@ async def convert(req: ConvertRequest):
     if not code or 'main' not in code:
         raise HTTPException(status_code=502, detail="Conversion came back empty or invalid. Try again.")
     return ConvertResponse(code=code, model=EXPLAIN_MODEL)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  /judge — sandboxed test-case runner (LeetCode-style Run/Submit)
+# ══════════════════════════════════════════════════════════════════════════════
+# Runs UNTRUSTED student code. The outer boundary is Render's isolated container;
+# every execution below is additionally bounded by an OS resource sandbox
+# (setrlimit in a preexec_fn) + a wall-clock watchdog that SIGKILLs the whole
+# process group. The LLM is never in this path. See backend/JUDGE.md.
+
+def _judge_env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, "").strip() or default)
+    except Exception:
+        return default
+
+
+def _judge_env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, "").strip() or default)
+    except Exception:
+        return default
+
+
+# ── Env-tunable sandbox limits ────────────────────────────────────────────────
+JUDGE_MAX_CASES         = _judge_env_int("JUDGE_MAX_CASES", 50)            # cases per request
+JUDGE_MAX_SOURCE_LEN    = _judge_env_int("JUDGE_MAX_SOURCE_LEN", 64_000)   # chars of source
+JUDGE_RUN_TIMEOUT_S     = _judge_env_float("JUDGE_RUN_TIMEOUT_S", 5.0)     # wall-clock per run
+JUDGE_COMPILE_TIMEOUT_S = _judge_env_float("JUDGE_COMPILE_TIMEOUT_S", 10.0)# wall-clock for g++
+JUDGE_TOTAL_TIMEOUT_S   = _judge_env_float("JUDGE_TOTAL_TIMEOUT_S", 30.0)  # wall-clock whole request
+JUDGE_MEM_LIMIT_MB      = _judge_env_int("JUDGE_MEM_LIMIT_MB", 256)        # RLIMIT_AS per run
+JUDGE_COMPILE_MEM_MB    = _judge_env_int("JUDGE_COMPILE_MEM_MB", 768)      # RLIMIT_AS for g++
+JUDGE_CPU_LIMIT_S       = _judge_env_int("JUDGE_CPU_LIMIT_S", 5)           # RLIMIT_CPU per run
+JUDGE_COMPILE_CPU_S     = _judge_env_int("JUDGE_COMPILE_CPU_S", 10)        # RLIMIT_CPU for g++
+JUDGE_OUTPUT_LIMIT      = _judge_env_int("JUDGE_OUTPUT_LIMIT", 64 * 1024)  # stdout cap (bytes) + RLIMIT_FSIZE at run
+JUDGE_COMPILE_FSIZE     = _judge_env_int("JUDGE_COMPILE_FSIZE", 64 * 1024 * 1024)  # RLIMIT_FSIZE for g++ (binary)
+JUDGE_MSG_LIMIT         = _judge_env_int("JUDGE_MSG_LIMIT", 2048)          # compiler/stderr message cap (bytes)
+JUDGE_NPROC_LIMIT       = _judge_env_int("JUDGE_NPROC_LIMIT", 64)          # RLIMIT_NPROC — contains fork bombs
+
+_PR_SET_NO_NEW_PRIVS = 38  # <linux/prctl.h>
+# A minimal environment for student code — critically, this is NOT os.environ, so
+# LLM API keys and other secrets in the process env never reach untrusted code.
+_JUDGE_CHILD_PATH = "/usr/local/bin:/usr/bin:/bin"
+
+
+def _judge_setlimit(which, soft, hard=None):
+    if not _RESOURCE_AVAILABLE:
+        return
+    try:
+        resource.setrlimit(which, (soft, hard if hard is not None else soft))
+    except Exception:
+        pass  # macOS ignores some of these; the Docker/Render path is authoritative
+
+
+def _judge_make_preexec(mem_mb: int, cpu_s: int, fsize: int, nproc: int):
+    """Returns a preexec_fn (runs in the child, after fork, before exec)."""
+    def _pre():
+        # New session/process-group so the watchdog can SIGKILL the whole tree.
+        os.setsid()
+        _judge_setlimit(resource.RLIMIT_CPU, cpu_s, cpu_s + 1)      # SIGXCPU then SIGKILL
+        _judge_setlimit(resource.RLIMIT_AS, mem_mb * 1024 * 1024)   # address space cap
+        _judge_setlimit(resource.RLIMIT_FSIZE, fsize)               # file-write cap (SIGXFSZ)
+        _judge_setlimit(resource.RLIMIT_CORE, 0)                    # no core dumps
+        if nproc:
+            _judge_setlimit(resource.RLIMIT_NPROC, nproc)           # cap process count (fork bombs)
+        # no-new-privileges: student code can't gain privileges via setuid bins.
+        try:
+            import ctypes
+            libc = ctypes.CDLL("libc.so.6", use_errno=True)
+            libc.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+        except Exception:
+            pass
+    return _pre
+
+
+def _judge_kill_group(proc: "subprocess.Popen") -> None:
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _judge_read_capped(path: str, cap: int) -> str:
+    try:
+        with open(path, "rb") as f:
+            data = f.read(cap + 1)
+    except Exception:
+        return ""
+    truncated = len(data) > cap
+    data = data[:cap]
+    text = data.decode("utf-8", errors="replace")
+    if truncated:
+        text += "\n…[truncated]"
+    return text
+
+
+def _judge_run_once(argv, input_text, workdir, timeout, mem_mb, cpu_s, fsize):
+    """Run one command under the sandbox. Returns a dict describing the outcome.
+    stdin/stdout/stderr are files (no pipe deadlock, no unbounded parent memory)."""
+    in_p = os.path.join(workdir, "stdin.txt")
+    out_p = os.path.join(workdir, "stdout.txt")
+    err_p = os.path.join(workdir, "stderr.txt")
+    with open(in_p, "w", encoding="utf-8") as f:
+        f.write(input_text or "")
+    child_env = {"PATH": _JUDGE_CHILD_PATH, "LANG": "C.UTF-8",
+                 "LC_ALL": "C.UTF-8", "HOME": workdir}
+    timed_out = False
+    fin = open(in_p, "rb")
+    fout = open(out_p, "wb")
+    ferr = open(err_p, "wb")
+    start = time.perf_counter()
+    try:
+        proc = subprocess.Popen(
+            argv, stdin=fin, stdout=fout, stderr=ferr, cwd=workdir,
+            env=child_env, close_fds=True,
+            preexec_fn=_judge_make_preexec(mem_mb, cpu_s, fsize, JUDGE_NPROC_LIMIT),
+        )
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _judge_kill_group(proc)   # kill the whole group, not just the pid
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+    finally:
+        for fh in (fin, fout, ferr):
+            try:
+                fh.close()
+            except Exception:
+                pass
+    elapsed_ms = int((time.perf_counter() - start) * 1000)
+    # Ensure no orphaned children of this group survive.
+    if timed_out:
+        _judge_kill_group(proc)
+    return {
+        "returncode": proc.returncode if proc.returncode is not None else -signal.SIGKILL,
+        "timed_out": timed_out,
+        "stdout": _judge_read_capped(out_p, JUDGE_OUTPUT_LIMIT),
+        "stderr": _judge_read_capped(err_p, JUDGE_MSG_LIMIT),
+        "elapsed_ms": elapsed_ms,
+    }
+
+
+def _judge_normalize(s: str) -> str:
+    """Mirror frontend outputsMatch: CRLF→LF, rstrip each line, strip trailing NLs."""
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [ln.rstrip() for ln in s.split("\n")]
+    return "\n".join(lines).rstrip("\n")
+
+
+def _judge_signal_message(sig: int, kind: str) -> str:
+    try:
+        name = signal.Signals(sig).name
+    except Exception:
+        name = str(sig)
+    if sig == signal.SIGXFSZ:
+        return f"Output limit exceeded (> {JUDGE_OUTPUT_LIMIT // 1024}KB written)"
+    if sig == signal.SIGXCPU:
+        return "CPU time limit exceeded"
+    if sig == signal.SIGKILL:
+        return "Killed — hit a memory or time limit"
+    if sig == signal.SIGABRT:
+        return f"Runtime error: aborted ({name}) — often an uncaught exception or bad_alloc"
+    if sig == signal.SIGSEGV:
+        return f"Runtime error: segmentation fault ({name})"
+    return f"{kind}: process killed by signal {sig} ({name})"
+
+
+def _judge_classify(case, r) -> dict:
+    seq = case.seq
+    tm = r["elapsed_ms"]
+    if r["timed_out"]:
+        return {"seq": seq, "verdict": "error",
+                "message": f"Time limit exceeded (> {JUDGE_RUN_TIMEOUT_S:g}s)", "timeMs": tm}
+    rc = r["returncode"]
+    if rc < 0:
+        msg = _judge_signal_message(-rc, "Runtime error")
+        if r["stderr"].strip():
+            msg = f"{msg}\n{r['stderr'].strip()}"
+        return {"seq": seq, "verdict": "error", "message": msg[:JUDGE_MSG_LIMIT], "timeMs": tm}
+    if rc != 0:
+        msg = f"Runtime error: exited with code {rc}"
+        if r["stderr"].strip():
+            msg = f"{msg}\n{r['stderr'].strip()}"
+        return {"seq": seq, "verdict": "error", "message": msg[:JUDGE_MSG_LIMIT], "timeMs": tm}
+    # Exited cleanly — compare output.
+    if _judge_normalize(r["stdout"]) == _judge_normalize(case.expected_output or ""):
+        return {"seq": seq, "verdict": "passed", "stdout": r["stdout"], "timeMs": tm}
+    return {"seq": seq, "verdict": "failed", "stdout": r["stdout"], "timeMs": tm}
+
+
+class JudgeCase(BaseModel):
+    seq: int
+    input: str = ""
+    expected_output: str = ""
+
+
+class JudgeRequest(BaseModel):
+    problem_id: Any = None       # accepts number|string; unused for now
+    language: str
+    source: str
+    cases: List[JudgeCase] = []
+
+
+def _judge_all(cases, verdict: str, message: str) -> dict:
+    return {"results": [{"seq": c.seq, "verdict": verdict, "message": message} for c in cases]}
+
+
+# NOTE: intentionally a *sync* def — FastAPI runs it in a threadpool, so the
+# blocking subprocess/watchdog work never stalls the async event loop.
+@app.post("/judge")
+def judge(req: JudgeRequest):
+    lang = (req.language or "").lower().strip()
+    cases = list(req.cases or [])[:JUDGE_MAX_CASES]
+
+    if not cases:
+        return {"results": []}
+    if lang not in ("cpp", "c++", "python", "py"):
+        return _judge_all(
+            cases, "error",
+            f"Unsupported language '{req.language}'. Supported: cpp, python.")
+    if not (req.source or "").strip():
+        return _judge_all(cases, "error", "Source code is empty.")
+    if len(req.source) > JUDGE_MAX_SOURCE_LEN:
+        return _judge_all(
+            cases, "error",
+            f"Source too long (max {JUDGE_MAX_SOURCE_LEN} chars).")
+
+    request_start = time.perf_counter()
+    workdir = tempfile.mkdtemp(prefix="judge_")
+    try:
+        if lang in ("cpp", "c++"):
+            with open(os.path.join(workdir, "src.cpp"), "w", encoding="utf-8") as f:
+                f.write(req.source)
+            comp = _judge_run_once(
+                ["g++", "-std=c++17", "-O2", "-o", "bin", "src.cpp"],
+                "", workdir, JUDGE_COMPILE_TIMEOUT_S,
+                JUDGE_COMPILE_MEM_MB, JUDGE_COMPILE_CPU_S, JUDGE_COMPILE_FSIZE)
+            compiled_ok = (not comp["timed_out"]) and comp["returncode"] == 0
+            if not compiled_ok:
+                if comp["timed_out"]:
+                    msg = f"Compilation timed out (> {JUDGE_COMPILE_TIMEOUT_S:g}s)"
+                elif comp["stderr"].strip():
+                    msg = comp["stderr"].strip()
+                elif comp["returncode"] < 0:
+                    msg = "Compiler killed — " + _judge_signal_message(-comp["returncode"], "compiler")
+                else:
+                    msg = f"Compilation failed (g++ exited with code {comp['returncode']})"
+                # No run — every case is an error with the compiler message.
+                return _judge_all(cases, "error", msg[:JUDGE_MSG_LIMIT])
+            run_argv = [os.path.join(workdir, "bin")]
+        else:  # python
+            with open(os.path.join(workdir, "main.py"), "w", encoding="utf-8") as f:
+                f.write(req.source)
+            run_argv = ["python3", "main.py"]
+
+        results = []
+        for c in cases:
+            if (time.perf_counter() - request_start) > JUDGE_TOTAL_TIMEOUT_S:
+                results.append({
+                    "seq": c.seq, "verdict": "error",
+                    "message": "Judge total time budget exceeded; case not run."})
+                continue
+            r = _judge_run_once(
+                run_argv, c.input, workdir, JUDGE_RUN_TIMEOUT_S,
+                JUDGE_MEM_LIMIT_MB, JUDGE_CPU_LIMIT_S, JUDGE_OUTPUT_LIMIT)
+            results.append(_judge_classify(c, r))
+        return {"results": results}
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 @app.get("/health")
