@@ -753,7 +753,7 @@ JUDGE_COMPILE_CPU_S     = _judge_env_int("JUDGE_COMPILE_CPU_S", 10)        # RLI
 JUDGE_OUTPUT_LIMIT      = _judge_env_int("JUDGE_OUTPUT_LIMIT", 64 * 1024)  # stdout cap (bytes) + RLIMIT_FSIZE at run
 JUDGE_COMPILE_FSIZE     = _judge_env_int("JUDGE_COMPILE_FSIZE", 64 * 1024 * 1024)  # RLIMIT_FSIZE for g++ (binary)
 JUDGE_MSG_LIMIT         = _judge_env_int("JUDGE_MSG_LIMIT", 2048)          # compiler/stderr message cap (bytes)
-JUDGE_NPROC_LIMIT       = _judge_env_int("JUDGE_NPROC_LIMIT", 64)          # RLIMIT_NPROC — contains fork bombs
+JUDGE_NPROC_LIMIT       = _judge_env_int("JUDGE_NPROC_LIMIT", 0)           # RLIMIT_NPROC off — per-UID limit breaks g++ fork on shared hosts; fork bombs handled by timeout+killpg
 
 _PR_SET_NO_NEW_PRIVS = 38  # <linux/prctl.h>
 # A minimal environment for student code — critically, this is NOT os.environ, so
@@ -779,8 +779,11 @@ def _judge_make_preexec(mem_mb: int, cpu_s: int, fsize: int, nproc: int):
         _judge_setlimit(resource.RLIMIT_AS, mem_mb * 1024 * 1024)   # address space cap
         _judge_setlimit(resource.RLIMIT_FSIZE, fsize)               # file-write cap (SIGXFSZ)
         _judge_setlimit(resource.RLIMIT_CORE, 0)                    # no core dumps
-        if nproc:
-            _judge_setlimit(resource.RLIMIT_NPROC, nproc)           # cap process count (fork bombs)
+        # RLIMIT_NPROC intentionally NOT set: it is per-UID, not per-process, so on
+        # a shared host it counts the container's existing processes and makes g++
+        # fail to fork cc1plus ("vfork: Resource temporarily unavailable"). Fork
+        # bombs are already contained by the wall-clock watchdog + killpg of the
+        # whole process group, which is the reliable mechanism here.
         # no-new-privileges: student code can't gain privileges via setuid bins.
         try:
             import ctypes
