@@ -1,9 +1,14 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { useExecutionStore } from '../store/executionStore';
-import ProblemPanel, { OAProblem } from '../components/ProblemPanel';
+import ProblemPanel from '../components/ProblemPanel';
 import CodePanel from '../components/CodePanel';
 import ToolWorkspace, { ColDivider } from '../components/ToolWorkspace';
+import TestRunner, { PassInfo } from '../components/solve/TestRunner';
+import SolvedMoment, { SolvedFacts, SolvedTier } from '../components/solve/SolvedMoment';
+import { ProblemSkeleton, EditorSkeleton } from '../components/solve/Skeletons';
+import { OAProblem, normalizeDifficulty, sampleCases } from '../types/problem';
+import { recordSolve, hasSolved } from '../lib/solveTally';
 
 // Where the OA question API lives (the live onlineassessments.tech shell).
 const OA_API = (import.meta.env.VITE_OA_API_URL ?? 'https://onlineassessments.tech').replace(/\/+$/, '');
@@ -26,6 +31,9 @@ export default function SolvePage() {
   const { id } = useParams();
   const [sp] = useSearchParams();
   const token = sp.get('t') ?? '';
+  // A landing page can hand the editor a program: /solve/:id?code=<encoded>.
+  // When it does, it wins over the question's starter code.
+  const prefill = sp.get('code') ?? '';
 
   const setAppMode = useExecutionStore(s => s.setAppMode);
   const setProblemStatement = useExecutionStore(s => s.setProblemStatement);
@@ -35,6 +43,12 @@ export default function SolvePage() {
   const [problem, setProblem] = useState<OAProblem | null>(null);
   const [status, setStatus] = useState<Status>('loading');
   const [tab, setTab] = useState<SolveTab>('code');
+
+  // The passing moment. `solved` is sticky (the top-bar pill); `moment` is the
+  // transient card and is only ever set as the direct consequence of a run.
+  const [solved, setSolved] = useState(false);
+  const [moment, setMoment] = useState<SolvedFacts | null>(null);
+  const openedAt = useRef<number>(Date.now());
 
   // Split between problem (left) and editor (right) on the Code tab.
   const [leftPct, setLeftPct] = useState(42);
@@ -60,14 +74,27 @@ export default function SolvePage() {
     return () => { cancelled = true; };
   }, [id, token]);
 
-  // Once loaded: ground the tutor/interview in this problem, and start the editor
-  // fresh (a neutral skeleton) instead of the demo trace. Done once per problem.
+  // Once loaded: ground the tutor/interview in this problem, and seed the editor.
+  // Imported questions carry a real `starter_code` stub — that is what the
+  // student expects to see. Everything else falls back to the neutral skeleton
+  // this page has always used. Done once per problem.
   useEffect(() => {
     if (status !== 'ok' || !problem) return;
-    setProblemStatement(`${problem.title}\n\n${problem.text}`.trim());
-    setEditorSource(`// ${problem.title}\n// Write your solution below, then Run.\n\n`);
+    const statement = problem.statement_md?.trim() || problem.text?.trim() || '';
+    setProblemStatement(`${problem.title}\n\n${statement}`.trim());
+    const starter = problem.starter_code?.trim();
+    setEditorSource(
+      prefill.trim()
+        ? prefill
+        : starter
+          ? `${starter}\n`
+          : `// ${problem.title}\n// Write your solution below, then Run.\n\n`,
+    );
     clearTrace();
     setAppMode('debug');
+    openedAt.current = Date.now();
+    setSolved(hasSolved(problem.id));
+    setMoment(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, problem]);
 
@@ -80,6 +107,40 @@ export default function SolvePage() {
     if (mode) setAppMode(mode);
   };
 
+  const cases = useMemo(() => sampleCases(problem), [problem]);
+  const difficulty = normalizeDifficulty(problem?.difficulty);
+
+  // ── The passing moment ──────────────────────────────────────────────────
+  // Fired only when SUBMIT grades every case (samples + hidden) as passing — the
+  // real "you solved it". Three unequal tiers: the overwhelming majority get
+  // tier 1 — the inline green wash inside TestRunner — and nothing else. A card
+  // only interrupts when the solve was genuinely notable, confetti only on a
+  // milestone.
+  const handleSolved = useCallback((info: PassInfo) => {
+    if (!problem) return;
+    const record = recordSolve(problem.id);
+    setSolved(true);
+
+    let tier: SolvedTier = 'wash';
+    if (record.firstTime && record.milestone !== null) tier = 'milestone';
+    else if (record.firstTime && (difficulty === 'hard' || info.attempts >= 3)) tier = 'card';
+
+    if (tier === 'wash') return;   // the inline confirmation already happened
+
+    setMoment({
+      tier,
+      title: problem.title,
+      passed: info.passed,
+      total: info.total,
+      attempts: info.attempts,
+      elapsedMs: Date.now() - openedAt.current,
+      difficulty,
+      tally: record,
+    });
+  }, [problem, difficulty]);
+
+  const isFailState = status !== 'ok' && status !== 'loading';
+
   return (
     <div className="flex flex-col h-screen bg-[#09090b] text-zinc-100 overflow-hidden select-none">
       {/* Top bar: brand · title · tabs */}
@@ -90,6 +151,14 @@ export default function SolvePage() {
           <span className="hidden md:inline text-zinc-400 text-xs font-mono truncate max-w-[46vw]">
             {problem ? problem.title : status === 'loading' ? 'Loading…' : 'Solve'}
           </span>
+          {solved && (
+            <span
+              className="hidden sm:inline-flex items-center gap-1 h-[20px] px-1.5 rounded text-[10px] font-mono text-green-400 bg-green-400/10 border border-green-400/30"
+              title="All sample cases passed"
+            >
+              ✓ Solved
+            </span>
+          )}
         </div>
 
         <nav className="flex items-center gap-1">
@@ -112,11 +181,22 @@ export default function SolvePage() {
       </header>
 
       {/* Body */}
-      {status !== 'ok' ? (
+      {status === 'loading' ? (
+        // Skeleton of the layout that is about to arrive, not a blank pane.
+        <div className="flex flex-1 overflow-hidden">
+          <div style={{ width: `${leftPct}%` }} className="flex-shrink-0 flex flex-col overflow-hidden">
+            <ProblemSkeleton />
+          </div>
+          <div className="flex-shrink-0" style={{ width: 6 }} />
+          <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+            <EditorSkeleton />
+          </div>
+        </div>
+      ) : isFailState ? (
         <StatusView status={status} />
       ) : tab === 'code' ? (
-        // LeetCode split: problem left, editor right.
-        <div ref={containerRef} className="flex flex-1 overflow-hidden">
+        // LeetCode split: problem left, editor + test cases right.
+        <div ref={containerRef} className="flex flex-1 overflow-hidden relative">
           <div style={{ width: `${leftPct}%` }} className="flex-shrink-0 flex flex-col overflow-hidden">
             <ProblemPanel problem={problem!} />
           </div>
@@ -125,8 +205,32 @@ export default function SolvePage() {
             setLeftPct(p => Math.min(Math.max(p + delta, 25), 60));
           }} />
           <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-            <CodePanel />
+            <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+              <CodePanel />
+            </div>
+            {/* Mounted when the question has visible sample cases OR any gradeable
+                cases at all (so Submit is reachable even when every case is
+                hidden). A legacy row with neither gets no drawer rather than an
+                empty one. Keyed on the question so attempts/verdicts reset with it. */}
+            {(cases.length > 0 || (problem!.total_cases ?? 0) > 0) && (
+              <TestRunner
+                key={problem!.id}
+                cases={cases}
+                problemId={problem!.id}
+                totalCases={problem!.total_cases}
+                onSolved={handleSolved}
+              />
+            )}
           </div>
+
+          {moment && (
+            <SolvedMoment
+              facts={moment}
+              onClose={() => setMoment(null)}
+              onPrimary={() => { setMoment(null); selectTab('tutor'); }}
+              primaryLabel="Explain how it ran →"
+            />
+          )}
         </div>
       ) : (
         // Animation / Tutor / Interview — the full DryRun experience, problem hidden.

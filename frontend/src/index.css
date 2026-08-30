@@ -70,3 +70,61 @@ body {
 .arrow-null {
   filter: drop-shadow(0 0 2px rgba(107, 114, 128, 0.3));
 }
+
+/* ── /solve/:id — the passing moment ───────────────────────────────────────
+   Every animation here is namespaced `dr-` and only ever applies together with
+   `.dr-anim`, so the reduced-motion escape hatch at the bottom can neutralise
+   the celebration without touching any pre-existing animation in the tool
+   (the Run spinner, the timeline, framer-motion on the marketing pages). */
+
+@keyframes dr-fade { from { opacity: 0 } to { opacity: 1 } }
+.dr-anim.dr-fade { animation: dr-fade .22s cubic-bezier(.22,1,.36,1); }
+
+@keyframes dr-pop {
+  0%   { opacity: 0; transform: translateY(22px) scale(.9) }
+  100% { opacity: 1; transform: none }
+}
+.dr-anim.dr-pop      { animation: dr-pop .5s cubic-bezier(.34,1.56,.64,1); }
+.dr-anim.dr-pop-late { animation: dr-pop .55s cubic-bezier(.34,1.56,.64,1) .1s backwards; }
+
+@keyframes dr-rise { from { opacity: 0; transform: translateY(9px) } to { opacity: 1; transform: none } }
+.dr-anim.dr-rise-1 { animation: dr-rise .38s cubic-bezier(.22,1,.36,1) .30s backwards; }
+.dr-anim.dr-rise-2 { animation: dr-rise .38s cubic-bezier(.22,1,.36,1) .38s backwards; }
+.dr-anim.dr-rise-3 { animation: dr-rise .38s cubic-bezier(.22,1,.36,1) .46s backwards; }
+.dr-anim.dr-rise-4 { animation: dr-rise .40s cubic-bezier(.22,1,.36,1) .58s backwards; }
+.dr-anim.dr-rise-5 { animation: dr-rise .40s cubic-bezier(.22,1,.36,1) .70s backwards; }
+
+/* the seal: the ring sweeps closed, then the tick draws inside it */
+@keyframes dr-sweep { to { stroke-dashoffset: 0 } }
+.dr-anim.dr-sweep { animation: dr-sweep .55s cubic-bezier(.22,1,.36,1) forwards; }
+@keyframes dr-draw { to { stroke-dashoffset: 0 } }
+.dr-anim.dr-draw { animation: dr-draw .34s cubic-bezier(.22,1,.36,1) .38s forwards; }
+
+/* one burst, 28 pieces, no loop — the element is unmounted straight after */
+@keyframes dr-burst {
+  0%   { opacity: 1; transform: translate(0,0) rotate(0) scale(.7) }
+  70%  { opacity: 1 }
+  100% { opacity: 0; transform: translate(var(--dx), var(--dy)) rotate(var(--rot)) scale(1) }
+}
+.dr-anim.dr-confetti {
+  position: absolute; top: 44%; left: 50%;
+  width: 6px; height: 9px; border-radius: 1px; opacity: 0;
+  animation: dr-burst .95s cubic-bezier(.22,1,.36,1) forwards;
+}
+
+/* tier 1 — the ordinary solve. A single green wash across the row, once. */
+@keyframes dr-wash { from { opacity: 1; transform: translateX(-100%) } to { opacity: 0; transform: translateX(0) } }
+.dr-anim.dr-wash::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(90deg, rgba(74,222,128,.22), transparent 55%);
+  animation: dr-wash .8s cubic-bezier(.22,1,.36,1) forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dr-anim, .dr-anim::after {
+    animation-duration: .001ms !important;
+    animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
+  }
+  .dr-anim.dr-confetti { display: none !important; }
+}
