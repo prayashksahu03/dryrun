@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { ArrowRight, Braces, Sparkles, MessagesSquare, Play, Check } from 'lucide-react';
+import CampusCollabBanner from '../components/site/CampusCollabBanner';
 
 const fadeUp = {
   initial: { opacity: 0, y: 16 },
@@ -38,6 +39,8 @@ const CONCEPTS = ['Pointers', 'Linked lists', 'Recursion', 'Trees', 'Graphs · B
 export default function HomePage() {
   return (
     <div>
+      <CampusCollabBanner />
+
       {/* ── Hero ─────────────────────────────────────────────────────── */}
       <section className="relative overflow-hidden">
         {/* subtle violet glow */}
